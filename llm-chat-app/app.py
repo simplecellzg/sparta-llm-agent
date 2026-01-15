@@ -91,6 +91,15 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+# Enable gzip compression for API responses
+try:
+    from flask_compress import Compress
+    compress = Compress()
+    compress.init_app(app)
+    logger.info("✅ Gzip compression enabled (flask-compress)")
+except ImportError:
+    logger.warning("⚠️  flask-compress not installed, compression disabled. Install with: pip install flask-compress")
+
 # 配置
 API_URL = os.getenv('API_URL', 'https://api.mjdjourney.cn/v1')
 API_KEY = os.getenv('API_KEY', '')
@@ -2307,6 +2316,39 @@ def log_client_error():
     except Exception as e:
         logger.error(f"Error logging client error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# Performance Monitoring
+# ============================================================================
+
+@app.before_request
+def before_request():
+    """Record request start time for performance monitoring"""
+    request.start_time = time.time()
+
+
+@app.after_request
+def after_request(response):
+    """Log request duration for slow request detection"""
+    if hasattr(request, 'start_time'):
+        duration = time.time() - request.start_time
+
+        # Log slow requests (> 1s)
+        if duration > 1.0:
+            logger.warning(
+                f"⚠️  Slow request: {request.method} {request.path} "
+                f"took {duration:.2f}s (status: {response.status_code})"
+            )
+
+        # Log very slow requests (> 5s) as errors
+        if duration > 5.0:
+            logger.error(
+                f"❌ Very slow request: {request.method} {request.path} "
+                f"took {duration:.2f}s (status: {response.status_code})"
+            )
+
+    return response
 
 
 if __name__ == '__main__':
