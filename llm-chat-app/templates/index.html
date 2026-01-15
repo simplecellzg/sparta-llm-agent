@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Chat - SPARTA DSMC 智能助手</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>">
+    <link rel="stylesheet" href="{{ url_for('static', filename='themes.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260115">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- KaTeX for LaTeX rendering -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <!-- Marked for Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/python.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/javascript.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/bash.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/sql.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/cpp.min.js"></script>
+    <!-- JSZip for ZIP file creation -->
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>SPARTA Chat</h1>
+                <button id="newChatBtn" class="btn-new-chat">
+                    <span>+</span> 新对话
+                </button>
+            </div>
+            <div class="conversation-list" id="conversationList">
+                <!-- 对话列表将通过JS动态加载 -->
+            </div>
+        </aside>
+
+        <!-- 主聊天区域 -->
+        <main class="chat-main">
+            <!-- 顶部工具栏 -->
+            <header class="chat-header">
+                <!-- MD下载按钮组 -->
+                <div class="download-btn-group">
+                    <button id="downloadMDBtn" class="btn-icon" title="下载当前版本(Markdown)">
+                        📝
+                    </button>
+                    <button id="downloadAllMDBtn" class="btn-icon" title="下载所有版本(Markdown)">
+                        📚
+                    </button>
+                </div>
+                <div class="model-selector">
+                    <label for="modelSelect">模型</label>
+                    <select id="modelSelect">
+                        {% for model in models %}
+                        <option value="{{ model }}">{{ model }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="rag-toggle">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ragToggle">
+                        <span class="toggle-slider"></span>
+                    </label>
+                <span class="rag-label">RAG对话</span>
+                    <span class="rag-tooltip" title="启用LightRAG知识图谱检索（仅用于普通对话，DSMC有独立检索逻辑）">?</span>
+                </div>
+                <!-- DSMC快速操作按钮 -->
+                <button id="generateDSMCBtn" class="btn-dsmc-generate" title="配置DSMC仿真参数">
+                    <span class="btn-icon-dsmc">⚙️</span>
+                    <span>DSMC参数设置</span>
+                </button>
+                <!-- DSMC模式指示器 -->
+                <div class="dsmc-indicator hidden" id="dsmcIndicator">
+                    <span class="dsmc-icon">🚀</span>
+                    <span class="dsmc-label">DSMC模式</span>
+                </div>
+                <!-- 运行进度指示器 -->
+                <div class="simulation-progress hidden" id="headerSimProgress">
+                    <span class="progress-icon" id="progressIcon">⏳</span>
+                    <span class="progress-text" id="progressText">0/1000</span>
+                </div>
+                <!-- 过程跟踪指示器 - 移到最右边 -->
+                <div class="process-tracker" id="processTracker">
+                    <span class="tracker-label">状态:</span>
+                    <span class="tracker-status" id="trackerStatus">就绪</span>
+                </div>
+            </header>
+
+            <!-- 状态显示区域 -->
+            <div id="statusBar" class="status-bar hidden">
+                <div class="status-content">
+                    <span class="status-spinner"></span>
+                    <span id="statusText">处理中...</span>
+                </div>
+                <div id="statusStats" class="status-stats hidden"></div>
+            </div>
+
+            <!-- 迭代标签条 -->
+            <div class="iteration-tabs hidden" id="iterationTabs">
+                <!-- 动态生成迭代标签 -->
+            </div>
+
+            <!-- 消息区域 -->
+            <div class="chat-messages" id="chatMessages">
+                <div class="welcome-message" id="welcomeMessage">
+                    <h2>欢迎使用 SPARTA Chat</h2>
+                    <p>智能对话助手，支持DSMC仿真、RAG知识库检索和多模态交互</p>
+                    <div class="feature-cards">
+                        <div class="feature-card">
+                            <span class="icon">💬</span>
+                            <span>智能对话</span>
+                        </div>
+                        <div class="feature-card">
+                            <span class="icon">🚀</span>
+                            <span>DSMC仿真</span>
+                        </div>
+                        <div class="feature-card">
+                            <span class="icon">🔍</span>
+                            <span>RAG检索</span>
+                        </div>
+                        <div class="feature-card">
+                            <span class="icon">📐</span>
+                            <span>LaTeX公式</span>
+                        </div>
+                        <div class="feature-card">
+                            <span class="icon">🖼️</span>
+                            <span>图片分析</span>
+                        </div>
+                        <div class="feature-card">
+                            <span class="icon">📄</span>
+                            <span>文件解析</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 输入区域 -->
+            <div class="chat-input-area">
+                <div class="input-attachments" id="inputAttachments">
+                    <!-- 附件预览 -->
+                </div>
+                <div class="input-container">
+                    <div class="input-actions">
+                        <button id="uploadImageBtn" class="btn-icon" title="上传图片">
+                            🖼️
+                        </button>
+                        <button id="uploadFileBtn" class="btn-icon" title="上传文件">
+                            📎
+                        </button>
+                    </div>
+                    <textarea
+                        id="messageInput"
+                        placeholder="输入消息，按Enter发送，Shift+Enter换行..."
+                        rows="1"
+                    ></textarea>
+                    <button id="sendBtn" class="btn-send" disabled>
+                        <span class="send-icon">➤</span>
+                    </button>
+                </div>
+                <input type="file" id="imageInput" accept="image/*" multiple hidden>
+                <input type="file" id="fileInput" hidden>
+            </div>
+        </main>
+
+        <!-- DSMC综合控制面板 - 右侧（合并运行控制和文件监控） -->
+        <aside class="dsmc-control-panel disabled" id="dsmcControlPanel">
+            <div class="control-panel-header">
+                <h4>🚀 DSMC控制面板</h4>
+                <button class="panel-close-btn" onclick="hideDSMCControlPanel()" title="关闭">×</button>
+            </div>
+
+            <!-- 运行控制区域 -->
+            <div class="control-section">
+                <div class="section-header">
+                    <h5>▶️ 运行控制</h5>
+                </div>
+                <div class="run-params-grid">
+                    <div class="run-param-item">
+                        <label for="panelNumCores">CPU核数</label>
+                        <input type="number" id="panelNumCores" value="4" min="1" max="128" />
+                    </div>
+                    <div class="run-param-item">
+                        <label for="panelMaxSteps">最大步数</label>
+                        <input type="number" id="panelMaxSteps" value="1000" min="100" max="100000" step="100" />
+                    </div>
+                    <div class="run-param-item">
+                        <label for="panelMaxMemory">内存限制(GB)</label>
+                        <input type="number" id="panelMaxMemory" value="100" min="1" max="1024" step="1" />
+                    </div>
+                    <div class="run-param-item">
+                        <label for="panelMaxFixAttempts">最大修复次数</label>
+                        <input type="number" id="panelMaxFixAttempts" value="3" min="0" max="10" step="1" />
+                    </div>
+                </div>
+                <div class="run-panel-actions-grid">
+                    <!-- 第一行：运行控制 - 居中显示 -->
+                    <div class="action-row action-row-center">
+                        <button onclick="runSimulation()" class="btn-panel-primary btn-run-main" id="runSimulationBtn">
+                            <span class="btn-icon-inline">▶️</span> 运行仿真
+                        </button>
+                        <button onclick="stopSimulation()" class="btn-panel-danger btn-run-main hidden" id="stopSimulationBtn">
+                            <span class="btn-icon-inline">⏹️</span> 停止仿真
+                        </button>
+                    </div>
+                    <!-- 第二行：编辑操作 -->
+                    <div class="action-row">
+                        <button onclick="showAIEditModal()" class="btn-panel-secondary" id="aiEditBtn" style="grid-column: span 2;">
+                            <span class="btn-icon-inline">🤖</span> AI修改
+                        </button>
+                    </div>
+                    <!-- 第三行：下载操作 -->
+                    <div class="action-row">
+                        <button onclick="downloadInputFile()" class="btn-panel-secondary">
+                            <span class="btn-icon-inline">📄</span> 下载输入
+                        </button>
+                        <button onclick="downloadAllFiles()" class="btn-panel-secondary" id="downloadAllBtn">
+                            <span class="btn-icon-inline">📦</span> 打包下载
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 时间统计区域 - 单行紧凑显示 -->
+            <div class="control-section time-stats-section">
+                <div class="time-stats-inline" id="timingStats">
+                    <div class="stat-item">
+                        <span class="stat-label">累计</span>
+                        <span class="stat-value" id="totalTime">0.0s</span>
+                    </div>
+                    <span class="stat-divider">|</span>
+                    <div class="stat-item">
+                        <span class="stat-label">当前</span>
+                        <span class="stat-value" id="currentIterationTime">0.0s</span>
+                    </div>
+                    <span class="stat-divider">|</span>
+                    <div class="stat-item">
+                        <span class="stat-label">迭代</span>
+                        <span class="stat-value" id="iterationCount">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 工作目录区域 -->
+            <div class="control-section">
+                <div class="section-header">
+                    <h5>📁 工作目录</h5>
+                    <button class="btn-icon-small" onclick="refreshMonitor()" title="刷新">🔄</button>
+                </div>
+                <div class="workdir-container">
+                    <input type="text" id="workdirInput" class="workdir-input" readonly />
+                    <button class="btn-icon-small" onclick="copyWorkdir()" title="复制路径">📋</button>
+                </div>
+            </div>
+
+            <!-- 文件列表区域 -->
+            <div class="control-section file-section">
+                <div class="section-header">
+                    <h5>📂 文件列表</h5>
+                    <span id="totalFilesCount" class="badge">0</span>
+                </div>
+                <div id="fileListContainer" class="file-list-container">
+                    <!-- 文件列表将动态填充 -->
+                </div>
+            </div>
+
+            <!-- 日志监控区域 - 可拖拽调整高度 -->
+            <div class="control-section log-section" id="logSection">
+                <div class="log-resize-handle" id="logResizeHandle" title="拖拽调整高度"></div>
+                <div class="section-header">
+                    <h5>📜 日志监控</h5>
+                    <div class="log-controls">
+                        <label class="toggle-switch small">
+                            <input type="checkbox" id="autoScrollToggle" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">自动滚动</span>
+                    </div>
+                </div>
+                <div id="logContainer" class="log-container">
+                    <pre id="logContent" class="log-content">等待仿真运行...</pre>
+                </div>
+                <div class="log-info">
+                    <span id="logLineCount">0 行</span>
+                    <span id="logFileSize">0 B</span>
+                    <span id="logLastUpdate">-</span>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- 自定义弹窗容器 -->
+    <div id="customModalOverlay" class="custom-modal-overlay hidden">
+        <!-- AI编辑弹窗 -->
+        <div id="aiEditModal" class="custom-modal hidden">
+            <div class="modal-header">
+                <h3>🤖 AI修改输入文件</h3>
+                <button class="modal-close-btn" onclick="closeAIEditModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-description">请描述您希望对输入文件进行的修改。AI将根据您的需求自动调整参数。</p>
+                <textarea
+                    id="aiEditInput"
+                    class="modal-textarea"
+                    placeholder="例如：&#10;• 将温度提高到500K&#10;• 增加网格密度&#10;• 改用氩气作为工作气体&#10;• 延长模拟时间到2000步"
+                    rows="5"
+                ></textarea>
+                <div class="modal-examples">
+                    <span class="example-label">快速示例：</span>
+                    <button class="example-btn" onclick="setAIEditExample('增加网格密度')">增加网格</button>
+                    <button class="example-btn" onclick="setAIEditExample('提高温度到500K')">提高温度</button>
+                    <button class="example-btn" onclick="setAIEditExample('延长模拟时间')">延长时间</button>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeAIEditModal()" class="btn-modal-secondary">取消</button>
+                <button onclick="submitAIEdit()" class="btn-modal-primary">🚀 开始修改</button>
+            </div>
+        </div>
+
+        <!-- 确认删除弹窗 -->
+        <div id="deleteConfirmModal" class="custom-modal hidden">
+            <div class="modal-header">
+                <h3>🗑️ 删除迭代确认</h3>
+                <button class="modal-close-btn" onclick="closeDeleteConfirmModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-description" id="deleteConfirmMessage">确定要删除这个迭代吗？</p>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeDeleteConfirmModal()" class="btn-modal-secondary">取消</button>
+                <button onclick="deleteIterationTabOnly()" class="btn-modal-warning">仅删除标签</button>
+                <button onclick="deleteIterationCompletely()" class="btn-modal-danger">完全删除</button>
+            </div>
+        </div>
+
+        <!-- SPARTA输入文件上传选项弹窗 -->
+        <div id="inputFileUploadModal" class="custom-modal hidden">
+            <div class="modal-header">
+                <h3>📄 SPARTA输入文件已上传</h3>
+                <button class="modal-close-btn" onclick="closeInputFileUploadModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-description">检测到您上传了SPARTA输入文件，请选择处理方式：</p>
+                <div class="upload-file-preview" id="uploadedInputFilePreview">
+                    <!-- 文件名和简要预览动态填充 -->
+                </div>
+                <div id="inputFileValidationResult" class="validation-result hidden">
+                    <!-- 验证结果显示区域 -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeInputFileUploadModal()" class="btn-modal-secondary">取消</button>
+                <button onclick="useAsReference()" class="btn-modal-secondary">📚 作为参考</button>
+                <button onclick="validateAndRunDirectly()" class="btn-modal-primary" id="runDirectlyBtn">🚀 直接运行</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}?v=20260113a"></script>
+</body>
+</html>
