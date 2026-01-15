@@ -57,6 +57,12 @@
                         📚
                     </button>
                 </div>
+
+                <!-- Theme Toggle Button -->
+                <button id="themeToggleBtn" class="btn-icon theme-toggle" title="Switch Theme">
+                    🌙
+                </button>
+
                 <div class="model-selector">
                     <label for="modelSelect">模型</label>
                     <select id="modelSelect">
@@ -365,6 +371,7 @@
         </div>
     </div>
 
+    <script src="{{ url_for('static', filename='components/theme-manager.js') }}"></script>
     <script src="{{ url_for('static', filename='app.js') }}?v=20260113a"></script>
 </body>
 </html>

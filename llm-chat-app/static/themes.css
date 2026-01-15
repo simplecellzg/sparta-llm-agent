@@ -38,6 +38,10 @@
     --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 40px rgba(0, 0, 0, 0.5);
     --shadow-glow: 0 0 30px rgba(6, 182, 212, 0.3);
+
+    /* Code and RAG */
+    --code-bg: #0d1117;
+    --rag-color: #a78bfa;
 }
 
 /* Light Theme */
@@ -78,6 +82,10 @@
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
     --shadow-glow: 0 0 20px rgba(8, 145, 178, 0.2);
+
+    /* Code and RAG */
+    --code-bg: #f1f5f9;
+    --rag-color: #8b5cf6;
 }
 
 /* Smooth transitions for theme changes */
