@@ -11,6 +11,10 @@ let currentIterations = [];      // 当前会话的所有迭代
 let activeIterationId = null;    // 当前活跃的迭代ID
 let isEditMode = false;          // 是否处于编辑模式
 let iterationMessages = {};      // 每个迭代的消息缓存 { iteration_id: [messages] }
+let versionManager = null;       // 版本管理器实例
+let currentSessionId = null;     // 当前DSMC会话ID
+let sseConnection = null;        // SSE连接实例
+
 
 // 过程跟踪状态
 const PROCESS_STEPS = {
@@ -327,6 +331,664 @@ function setupParamChangeListeners() {
 
 // DOM元素
 const conversationList = document.getElementById('conversationList');
+// ==================== DSMC模板管理 ====================
+
+// DSMC Template Management
+let dsmcTemplates = [];
+
+// Load templates on page load
+async function loadDSMCTemplates() {
+    try {
+        const response = await fetch('/static/data/dsmc-templates.json');
+        const data = await response.json();
+        dsmcTemplates = data.templates;
+
+        // Populate template selector
+        const select = document.getElementById('templateSelect');
+        if (select) {
+            select.innerHTML = '<option value="">-- Select Template --</option>';
+            dsmcTemplates.forEach(template => {
+                const option = document.createElement('option');
+                option.value = template.id;
+                option.textContent = template.name;
+                select.appendChild(option);
+            });
+        }
+
+        console.log('DSMC templates loaded:', dsmcTemplates.length);
+    } catch (error) {
+        console.error('Failed to load DSMC templates:', error);
+    }
+}
+
+// Load template into form
+function loadTemplate() {
+    const select = document.getElementById('templateSelect');
+    const templateId = select.value;
+
+    if (!templateId) {
+        // Clear description
+        document.getElementById('templateDescription').textContent = '';
+        return;
+    }
+
+    const template = dsmcTemplates.find(t => t.id === templateId);
+    if (!template) {
+        console.error('Template not found:', templateId);
+        return;
+    }
+
+    // Show description
+    document.getElementById('templateDescription').textContent = template.description;
+
+    // Populate form fields
+    const params = template.parameters;
+
+    // Dimension
+    const dimensionRadios = document.querySelectorAll('input[name="dimension"]');
+    dimensionRadios.forEach(radio => {
+        radio.checked = radio.value === params.dimension;
+    });
+
+    // Geometry
+    const geometrySelect = document.getElementById('geometry');
+    if (geometrySelect) geometrySelect.value = params.geometry;
+
+    // Grid size
+    document.getElementById('gridX').value = params.grid_size[0];
+    document.getElementById('gridY').value = params.grid_size[1];
+    document.getElementById('gridZ').value = params.grid_size[2];
+
+    // Gas properties
+    const gasSelect = document.getElementById('gas');
+    if (gasSelect) gasSelect.value = params.gas;
+
+    document.getElementById('temperature').value = params.temperature;
+    document.getElementById('pressure').value = params.pressure;
+    document.getElementById('velocity').value = params.velocity;
+
+    // Atmospheric model
+    const atmModelRadios = document.querySelectorAll('input[name="atmospheric_model"]');
+    atmModelRadios.forEach(radio => {
+        radio.checked = radio.value === params.atmospheric_model;
+    });
+
+    if (params.altitude_km !== null) {
+        document.getElementById('altitude').value = params.altitude_km;
+        // Trigger atmospheric calculation
+        onAltitudeChange();
+    }
+
+    // Simulation parameters
+    document.getElementById('timestep').value = params.timestep;
+    document.getElementById('numSteps').value = params.num_steps;
+
+    const collisionSelect = document.getElementById('collisionModel');
+    if (collisionSelect) collisionSelect.value = params.collision_model;
+
+    console.log('Template loaded:', template.name);
+}
+
+// ==================== DSMC表单验证 ====================
+
+const validationRules = {
+    temperature: {
+        min: 50,
+        max: 5000,
+        unit: 'K',
+        validate: (value) => {
+            if (value <= 0) return { valid: false, message: 'Temperature must be > 0K' };
+            if (value < 50) return { valid: false, message: 'Temperature too low (min 50K)' };
+            if (value > 5000) return { valid: 'warning', message: 'Very high temperature (max recommended 5000K)' };
+            return { valid: true, message: 'Valid temperature range' };
+        },
+        tooltip: 'Gas temperature in Kelvin. SPARTA requires T > 0K. Typical range: 50-5000K.'
+    },
+    pressure: {
+        min: 0,
+        max: 1e7,
+        unit: 'Pa',
+        validate: (value) => {
+            if (value <= 0) return { valid: false, message: 'Pressure must be > 0 Pa' };
+            if (value < 0.01) return { valid: 'warning', message: 'Very low pressure (near vacuum)' };
+            if (value > 1e7) return { valid: 'warning', message: 'Very high pressure' };
+            return { valid: true, message: 'Valid pressure range' };
+        },
+        tooltip: 'Gas pressure in Pascals. Must be > 0. Vacuum: <1 Pa, Atmospheric: ~101325 Pa.'
+    },
+    velocity: {
+        min: 0,
+        max: 10000,
+        unit: 'm/s',
+        validate: (value) => {
+            if (value < 0) return { valid: false, message: 'Velocity cannot be negative' };
+            if (value > 10000) return { valid: 'warning', message: 'Very high velocity (>Mach 30)' };
+            return { valid: true, message: 'Valid velocity' };
+        },
+        tooltip: 'Flow velocity in m/s. 0 for stationary gas. Typical: 100-7500 m/s.'
+    },
+    gridX: {
+        min: 10,
+        max: 1000,
+        validate: (value) => {
+            if (value < 10) return { valid: false, message: 'Grid too coarse (min 10 cells)' };
+            if (value > 1000) return { valid: 'warning', message: 'Very fine grid (may be slow)' };
+            return { valid: true, message: 'Good grid resolution' };
+        },
+        tooltip: 'Number of grid cells in X direction. Min 10, recommended 50-200.'
+    },
+    gridY: {
+        min: 10,
+        max: 1000,
+        validate: (value) => {
+            if (value < 10) return { valid: false, message: 'Grid too coarse (min 10 cells)' };
+            if (value > 1000) return { valid: 'warning', message: 'Very fine grid (may be slow)' };
+            return { valid: true, message: 'Good grid resolution' };
+        },
+        tooltip: 'Number of grid cells in Y direction. Min 10, recommended 50-200.'
+    },
+    gridZ: {
+        min: 1,
+        max: 1000,
+        validate: (value, dimension) => {
+            if (dimension === '2d' && value !== 1) {
+                return { valid: false, message: '2D simulation must have Z=1' };
+            }
+            if (dimension === '3d' && value < 10) {
+                return { valid: false, message: 'Grid too coarse (min 10 cells for 3D)' };
+            }
+            if (value > 1000) return { valid: 'warning', message: 'Very fine grid (may be slow)' };
+            return { valid: true, message: 'Good grid resolution' };
+        },
+        tooltip: 'Number of grid cells in Z direction. For 2D: must be 1. For 3D: min 10.'
+    },
+    timestep: {
+        min: 1e-9,
+        max: 1e-4,
+        unit: 's',
+        validate: (value) => {
+            if (value <= 0) return { valid: false, message: 'Timestep must be > 0' };
+            if (value < 1e-9) return { valid: false, message: 'Timestep too small' };
+            if (value > 1e-4) return { valid: 'warning', message: 'Timestep may be too large' };
+            return { valid: true, message: 'Valid timestep' };
+        },
+        tooltip: 'Simulation timestep in seconds. Must be smaller than mean collision time. Typical: 1e-7 to 1e-6 s.'
+    },
+    numSteps: {
+        min: 100,
+        max: 100000,
+        validate: (value) => {
+            if (value < 100) return { valid: false, message: 'Too few steps (min 100)' };
+            if (value > 100000) return { valid: 'warning', message: 'Many steps (may take long time)' };
+            return { valid: true, message: 'Good number of steps' };
+        },
+        tooltip: 'Number of simulation timesteps. More steps = more accurate but slower. Typical: 1000-10000.'
+    }
+};
+
+function validateField(fieldId, value, extraContext = {}) {
+    const rule = validationRules[fieldId];
+    if (!rule) return { valid: true };
+
+    let numValue = parseFloat(value);
+    if (isNaN(numValue)) {
+        return { valid: false, message: 'Invalid number' };
+    }
+
+    return rule.validate(numValue, extraContext.dimension);
+}
+
+function updateFieldValidation(fieldId) {
+    const input = document.getElementById(fieldId);
+    if (!input) return;
+
+    const value = input.value;
+
+    // Get extra context if needed
+    const extraContext = {};
+    if (fieldId === 'gridZ') {
+        const dimensionRadio = document.querySelector('input[name="dimension"]:checked');
+        extraContext.dimension = dimensionRadio ? dimensionRadio.value : '3d';
+    }
+
+    const result = validateField(fieldId, value, extraContext);
+
+    // Remove existing validation classes
+    input.classList.remove('valid', 'warning', 'invalid');
+
+    // Add new validation class
+    if (result.valid === true) {
+        input.classList.add('valid');
+    } else if (result.valid === 'warning') {
+        input.classList.add('warning');
+    } else {
+        input.classList.add('invalid');
+    }
+
+    // Update validation message
+    const messageId = fieldId + 'ValidationMessage';
+    let messageEl = document.getElementById(messageId);
+
+    if (!messageEl) {
+        // Create message element if it doesn't exist
+        messageEl = document.createElement('div');
+        messageEl.id = messageId;
+        messageEl.className = 'validation-message';
+        input.parentNode.appendChild(messageEl);
+    }
+
+    messageEl.textContent = result.message || '';
+    messageEl.classList.remove('success', 'warning', 'error');
+
+    if (result.valid === true) {
+        messageEl.classList.add('success');
+    } else if (result.valid === 'warning') {
+        messageEl.classList.add('warning');
+    } else {
+        messageEl.classList.add('error');
+    }
+
+    messageEl.classList.toggle('show', !!result.message);
+
+    return result;
+}
+
+function validateAllFields() {
+    const fieldsToValidate = [
+        'temperature', 'pressure', 'velocity',
+        'gridX', 'gridY', 'gridZ',
+        'timestep', 'numSteps'
+    ];
+
+    let allValid = true;
+    const errors = [];
+
+    fieldsToValidate.forEach(fieldId => {
+        const result = updateFieldValidation(fieldId);
+        if (result.valid !== true) {
+            allValid = false;
+            if (result.valid === false) {
+                errors.push(`${fieldId}: ${result.message}`);
+            }
+        }
+    });
+
+    return { valid: allValid, errors };
+}
+
+// Attach validation to input events
+function attachValidationListeners() {
+    const fieldsToValidate = [
+        'temperature', 'pressure', 'velocity',
+        'gridX', 'gridY', 'gridZ',
+        'timestep', 'numSteps'
+    ];
+
+    fieldsToValidate.forEach(fieldId => {
+        const input = document.getElementById(fieldId);
+        if (input) {
+            input.addEventListener('blur', () => updateFieldValidation(fieldId));
+            input.addEventListener('input', () => {
+                // Debounce validation on input
+                clearTimeout(input.validationTimeout);
+                input.validationTimeout = setTimeout(() => {
+                    updateFieldValidation(fieldId);
+                }, 500);
+            });
+        }
+    });
+
+    // Validate gridZ when dimension changes
+    const dimensionRadios = document.querySelectorAll('input[name="dimension"]');
+    dimensionRadios.forEach(radio => {
+        radio.addEventListener('change', () => {
+            updateFieldValidation('gridZ');
+        });
+    });
+}
+
+// ==================== 文件上传处理 ====================
+
+let uploadedFileData = null;
+
+async function handleSpartaFileUpload(file) {
+    try {
+        showStatus('Uploading and validating file...');
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch('/api/dsmc/upload-input', {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.valid) {
+            // Store upload data
+            uploadedFileData = result;
+
+            // Show modal
+            showUploadModal(result);
+
+            hideStatus();
+        } else {
+            // Show validation errors
+            showUploadErrors(result);
+        }
+    } catch (error) {
+        console.error('Upload failed:', error);
+        showStatus('Upload failed: ' + error.message, 'error');
+    }
+}
+
+function showUploadModal(result) {
+    // Populate file info
+    document.getElementById('uploadedFileName').textContent = result.stats.filename;
+    document.getElementById('uploadedFileStats').textContent =
+        `${result.stats.lines} 行 | ${result.stats.commands} 个命令`;
+
+    // Show preview
+    document.getElementById('uploadedInputFilePreview').textContent = result.preview;
+
+    // Show warnings if any
+    if (result.warnings && result.warnings.length > 0) {
+        const validationDiv = document.getElementById('inputFileValidationResult');
+        validationDiv.innerHTML = `
+            <h5>⚠️ 警告:</h5>
+            <ul>
+                ${result.warnings.map(w => `<li>${w}</li>`).join('')}
+            </ul>
+        `;
+        validationDiv.classList.remove('hidden');
+    } else {
+        document.getElementById('inputFileValidationResult').classList.add('hidden');
+    }
+
+    // Set default mode to direct_run
+    const directRunRadio = document.querySelector('input[name="uploadMode"][value="direct_run"]');
+    if (directRunRadio) {
+        directRunRadio.checked = true;
+        showRunConfigSection();
+    }
+
+    // Sync run params from control panel defaults
+    syncRunParamsFromPanel();
+
+    // Show modal
+    const modal = document.getElementById('inputFileUploadModal');
+    if (modal) modal.classList.remove('hidden');
+    const overlay = document.getElementById('customModalOverlay');
+    if (overlay) overlay.classList.remove('hidden');
+}
+
+function showUploadErrors(result) {
+    const modal = document.getElementById('inputFileUploadModal');
+    const statusDiv = document.getElementById('fileStatus');
+    const validationDiv = document.getElementById('inputFileValidationResult');
+
+    // Update status to error
+    if (statusDiv) {
+        statusDiv.innerHTML = `
+            <span class="status-icon">❌</span>
+            <span class="status-text">验证失败</span>
+        `;
+        statusDiv.classList.add('error');
+    }
+
+    // Show errors
+    if (validationDiv) {
+        validationDiv.innerHTML = `
+            <h5>❌ 错误:</h5>
+            <ul>
+                ${result.errors.map(e => `<li>${e}</li>`).join('')}
+            </ul>
+        `;
+
+        if (result.suggestions && result.suggestions.length > 0) {
+            validationDiv.innerHTML += `
+                <h5>💡 建议:</h5>
+                <ul>
+                    ${result.suggestions.map(s => `<li>${s}</li>`).join('')}
+                </ul>
+            `;
+        }
+
+        validationDiv.classList.remove('hidden');
+    }
+
+    // Hide mode selection (can't run invalid file)
+    const modeSection = document.querySelector('.upload-mode-section');
+    if (modeSection) modeSection.style.display = 'none';
+
+    // Change action button to close
+    const actionBtn = document.getElementById('uploadActionBtn');
+    if (actionBtn) {
+        actionBtn.textContent = '关闭';
+        actionBtn.onclick = closeInputFileUploadModal;
+    }
+
+    // Show modal
+    if (modal) modal.classList.remove('hidden');
+    const overlay = document.getElementById('customModalOverlay');
+    if (overlay) overlay.classList.remove('hidden');
+}
+
+function togglePreview() {
+    const preview = document.getElementById('uploadedInputFilePreview');
+    const btn = document.querySelector('.btn-toggle-preview');
+
+    if (preview) preview.classList.toggle('collapsed');
+    if (btn) btn.classList.toggle('expanded');
+}
+
+function syncRunParamsFromPanel() {
+    // Sync from control panel if values exist
+    const panelCores = document.getElementById('panelNumCores');
+    const panelSteps = document.getElementById('panelMaxSteps');
+    const panelMemory = document.getElementById('panelMaxMemory');
+    const panelFix = document.getElementById('panelMaxFixAttempts');
+
+    if (panelCores) {
+        const uploadCores = document.getElementById('uploadRunCores');
+        if (uploadCores) uploadCores.value = panelCores.value;
+    }
+    if (panelSteps) {
+        const uploadSteps = document.getElementById('uploadRunSteps');
+        if (uploadSteps) uploadSteps.value = panelSteps.value;
+    }
+    if (panelMemory) {
+        const uploadMemory = document.getElementById('uploadRunMemory');
+        if (uploadMemory) uploadMemory.value = panelMemory.value;
+    }
+    if (panelFix) {
+        const uploadFix = document.getElementById('uploadRunMaxFix');
+        if (uploadFix) uploadFix.value = panelFix.value;
+    }
+}
+
+function showRunConfigSection() {
+    const modeRadio = document.querySelector('input[name="uploadMode"]:checked');
+    if (!modeRadio) return;
+
+    const mode = modeRadio.value;
+    const configSection = document.getElementById('runConfigSection');
+    const actionBtn = document.getElementById('uploadActionBtn');
+
+    if (mode === 'direct_run') {
+        if (configSection) configSection.style.display = 'block';
+        if (actionBtn) {
+            actionBtn.innerHTML = '🚀 开始运行';
+            actionBtn.onclick = runUploadedFile;
+        }
+    } else {
+        if (configSection) configSection.style.display = 'none';
+        if (actionBtn) {
+            actionBtn.innerHTML = '📚 用作参考';
+            actionBtn.onclick = useUploadedFileAsReference;
+        }
+    }
+}
+
+async function runUploadedFile() {
+    if (!uploadedFileData) {
+        alert('No file data available');
+        return;
+    }
+
+    const uploadCores = document.getElementById('uploadRunCores');
+    const uploadSteps = document.getElementById('uploadRunSteps');
+    const uploadMemory = document.getElementById('uploadRunMemory');
+    const uploadFix = document.getElementById('uploadRunMaxFix');
+
+    const runParams = {
+        temp_id: uploadedFileData.temp_id,
+        num_cores: uploadCores ? parseInt(uploadCores.value) : 4,
+        max_steps: uploadSteps ? parseInt(uploadSteps.value) : 1000,
+        max_memory_gb: uploadMemory ? parseInt(uploadMemory.value) : 100,
+        max_fix_attempts: uploadFix ? parseInt(uploadFix.value) : 3
+    };
+
+    // Validate params
+    if (runParams.num_cores < 1 || runParams.num_cores > 128) {
+        alert('CPU核数必须在1-128之间');
+        return;
+    }
+
+    if (runParams.max_steps < 100) {
+        alert('步数不能少于100');
+        return;
+    }
+
+    try {
+        showStatus(`准备运行: ${runParams.num_cores}核心, ${runParams.max_steps}步...`);
+
+        // Close modal
+        closeInputFileUploadModal();
+
+        // Call backend to create session and run
+        const response = await fetch('/api/dsmc/run-uploaded', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(runParams)
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Open control panel
+            showDSMCControlPanel(result.session_id);
+
+            // Start monitoring
+            if (typeof monitorSimulation === 'function') {
+                monitorSimulation(result.session_id);
+            }
+
+            showStatus('仿真已启动', 'success');
+        } else {
+            showStatus('运行失败: ' + result.error, 'error');
+        }
+    } catch (error) {
+        console.error('Run failed:', error);
+        showStatus('运行失败: ' + error.message, 'error');
+    }
+}
+
+function useUploadedFileAsReference() {
+    if (!uploadedFileData || !uploadedFileData.params) {
+        alert('No parameters to extract');
+        return;
+    }
+
+    // Close modal
+    closeInputFileUploadModal();
+
+    // Open DSMC parameter form (if function exists)
+    if (typeof openDSMCParameterModal === 'function') {
+        openDSMCParameterModal();
+    }
+
+    // Populate form with extracted parameters
+    setTimeout(() => {
+        populateFormFromParams(uploadedFileData.params);
+        showStatus('参数已提取到表单', 'success');
+    }, 300);
+}
+
+function populateFormFromParams(params) {
+    // Dimension
+    if (params.dimension) {
+        const dimensionRadio = document.querySelector(`input[name="dimension"][value="${params.dimension}"]`);
+        if (dimensionRadio) dimensionRadio.checked = true;
+    }
+
+    // Grid
+    if (params.grid_size) {
+        const gridX = document.getElementById('gridX');
+        const gridY = document.getElementById('gridY');
+        const gridZ = document.getElementById('gridZ');
+        if (gridX) gridX.value = params.grid_size[0];
+        if (gridY) gridY.value = params.grid_size[1];
+        if (gridZ) gridZ.value = params.grid_size[2];
+    }
+
+    // Temperature
+    if (params.temperature) {
+        const temp = document.getElementById('temperature');
+        if (temp) temp.value = params.temperature;
+    }
+
+    // Velocity
+    if (params.velocity !== undefined) {
+        const vel = document.getElementById('velocity');
+        if (vel) vel.value = params.velocity;
+    }
+
+    // Gas
+    if (params.gas) {
+        const gasSelect = document.getElementById('gas');
+        if (gasSelect) gasSelect.value = params.gas;
+    }
+
+    // Timestep
+    if (params.timestep) {
+        const timestep = document.getElementById('timestep');
+        if (timestep) timestep.value = params.timestep;
+    }
+
+    // Steps
+    if (params.num_steps) {
+        const steps = document.getElementById('numSteps');
+        if (steps) steps.value = params.num_steps;
+    }
+
+    // Collision model
+    if (params.collision_model) {
+        const collisionSelect = document.getElementById('collisionModel');
+        if (collisionSelect) collisionSelect.value = params.collision_model;
+    }
+
+    console.log('Form populated with uploaded file parameters:', params);
+}
+
+function closeInputFileUploadModal() {
+    const modal = document.getElementById('inputFileUploadModal');
+    const overlay = document.getElementById('customModalOverlay');
+    const fileStatus = document.getElementById('fileStatus');
+    const modeSection = document.querySelector('.upload-mode-section');
+
+    if (modal) modal.classList.add('hidden');
+    if (overlay) overlay.classList.add('hidden');
+
+    // Reset
+    uploadedFileData = null;
+    if (fileStatus) fileStatus.classList.remove('error');
+    if (modeSection) modeSection.style.display = 'block';
+}
+
+// ==================== DOM元素引用 ====================
+
 const chatMessages = document.getElementById('chatMessages');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
@@ -353,6 +1015,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         loadConversations();
         setupEventListeners();
         setupMarkdown();
+        loadDSMCTemplates(); // Load DSMC template presets
+
+        // Attach validation listeners after a short delay to ensure DOM is ready
+        setTimeout(() => {
+            attachValidationListeners();
+        }, 500);
     }
 });
 
@@ -2921,6 +3589,255 @@ function stopMonitoring() {
     }
 }
 
+// ==================== 版本管理器集成 ====================
+
+// 初始化版本管理器
+function initializeVersionManager(sessionId) {
+    if (!sessionId) return;
+
+    currentSessionId = sessionId;
+
+    if (!versionManager) {
+        // 首次创建
+        if (typeof VersionManager !== 'undefined') {
+            versionManager = new VersionManager(sessionId);
+            const initialized = versionManager.init('versionHistoryList');
+            if (initialized) {
+                console.log('✅ VersionManager initialized for session:', sessionId);
+            }
+        } else {
+            console.warn('VersionManager not loaded');
+        }
+    } else {
+        // 更新现有实例
+        versionManager.sessionId = sessionId;
+        versionManager.loadIterations();
+    }
+
+    // 更新版本计数
+    updateVersionCount();
+}
+
+// 更新版本计数徽章
+async function updateVersionCount() {
+    const versionCountEl = document.getElementById('versionCount');
+    if (!versionCountEl) return;
+
+    if (!versionManager || !versionManager.iterations) {
+        versionCountEl.textContent = '0';
+        return;
+    }
+
+    versionCountEl.textContent = versionManager.iterations.length;
+}
+
+// 当新迭代开始时更新
+function onNewIterationStarted(sessionId, iterationId) {
+    console.log('New iteration started:', iterationId);
+    if (versionManager && versionManager.sessionId === sessionId) {
+        versionManager.loadIterations();
+    }
+}
+
+// 当迭代完成时更新
+function onIterationComplete(sessionId, iterationId, status) {
+    console.log('Iteration completed:', iterationId, status);
+    if (versionManager && versionManager.sessionId === sessionId) {
+        versionManager.loadIterations();
+    }
+}
+
+// ==================== Server-Sent Events (SSE) 实时更新 ====================
+
+// 连接SSE
+function connectSSE(sessionId) {
+    // 关闭现有连接
+    if (sseConnection) {
+        sseConnection.close();
+    }
+
+    // 创建新的EventSource连接
+    sseConnection = new EventSource(`/api/dsmc/sessions/${sessionId}/events`);
+
+    sseConnection.onopen = () => {
+        console.log('SSE connection opened');
+        updateProcessTracker('已连接', 'connected');
+    };
+
+    sseConnection.onmessage = (e) => {
+        const message = JSON.parse(e.data);
+        handleSSEMessage(message);
+    };
+
+    sseConnection.onerror = (error) => {
+        console.error('SSE error:', error);
+        updateProcessTracker('连接错误', 'error');
+
+        // 尝试在5秒后重新连接
+        setTimeout(() => {
+            if (currentSessionId) {
+                console.log('Attempting SSE reconnect...');
+                connectSSE(currentSessionId);
+            }
+        }, 5000);
+    };
+}
+
+// 断开SSE连接
+function disconnectSSE() {
+    if (sseConnection) {
+        sseConnection.close();
+        sseConnection = null;
+        console.log('SSE connection closed');
+    }
+}
+
+// 处理SSE消息
+function handleSSEMessage(message) {
+    const { type, data } = message;
+
+    console.log('SSE message received:', type, data);
+
+    switch (type) {
+        case 'connected':
+            console.log('SSE connected:', data);
+            break;
+
+        case 'heartbeat':
+            // 心跳 - 保持连接活跃
+            break;
+
+        case 'simulation_started':
+            console.log('Simulation started:', data);
+            updateProcessTracker('仿真运行中', 'running');
+            if (data.max_steps) {
+                updateHeaderProgress(0, data.max_steps);
+            }
+            break;
+
+        case 'progress_update':
+            console.log('Progress update:', data);
+            const { current_step, total_steps, percentage } = data;
+            if (current_step && total_steps) {
+                updateHeaderProgress(current_step, total_steps);
+            }
+            if (percentage !== undefined) {
+                updateProcessTracker(`运行中 ${percentage.toFixed(1)}%`, 'running');
+            }
+            break;
+
+        case 'simulation_completed':
+            console.log('Simulation completed:', data);
+            updateProcessTracker('已完成', 'completed');
+            if (data.total_time) {
+                updateHeaderProgress(data.total_steps || 1000, data.total_steps || 1000);
+            }
+
+            // 重新加载版本管理器以显示新迭代
+            if (versionManager) {
+                versionManager.loadIterations();
+            }
+
+            // 显示完成通知
+            if (data.total_time) {
+                showNotification('仿真完成', `总时间: ${data.total_time.toFixed(2)}s`, 'success');
+            } else {
+                showNotification('仿真完成', '仿真已成功完成', 'success');
+            }
+            break;
+
+        case 'simulation_failed':
+            console.log('Simulation failed:', data);
+            updateProcessTracker('失败', 'failed');
+
+            // 重新加载版本管理器
+            if (versionManager) {
+                versionManager.loadIterations();
+            }
+
+            // 显示错误通知
+            showNotification('仿真失败', data.error || '未知错误', 'error');
+            break;
+
+        case 'iteration_updated':
+            console.log('Iteration updated:', data);
+
+            // 重新加载版本管理器
+            if (versionManager) {
+                versionManager.loadIterations();
+            }
+            break;
+
+        default:
+            console.warn('Unknown SSE message type:', type);
+    }
+}
+
+// 更新头部进度指示器
+function updateHeaderProgress(current, total) {
+    const progressEl = document.getElementById('headerSimProgress');
+    const progressText = document.getElementById('progressText');
+    const progressIcon = document.getElementById('progressIcon');
+
+    if (!progressEl || !progressText || !progressIcon) return;
+
+    if (current >= total) {
+        progressEl.classList.add('hidden');
+    } else {
+        progressEl.classList.remove('hidden');
+        progressText.textContent = `${current}/${total}`;
+
+        // 动画图标
+        progressIcon.textContent = current % 200 === 0 ? '⌛' : '⏳';
+    }
+}
+
+// 显示通知
+function showNotification(title, message, type = 'info') {
+    // 简单的toast通知
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `<strong>${title}</strong><p>${message}</p>`;
+    toast.style.cssText = `
+        position: fixed;
+        top: 80px;
+        right: 20px;
+        padding: 16px 20px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        z-index: 10000;
+        min-width: 300px;
+        animation: slideIn 0.3s ease;
+    `;
+
+    document.body.appendChild(toast);
+
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+    }, 5000);
+}
+
+// 当DSMC生成完成时调用
+function onDSMCGenerationComplete(sessionId) {
+    currentSessionId = sessionId;
+
+    // 初始化版本管理器
+    initializeVersionManager(sessionId);
+
+    // 连接SSE进行实时更新
+    connectSSE(sessionId);
+
+    // 显示控制面板
+    showDSMCControlPanel();
+
+    // 开始监控
+    startMonitoring(sessionId);
+}
+
+
 // 刷新监控数据
 async function refreshMonitor() {
     if (!dsmcSession) return;
@@ -4987,3 +5904,113 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+// Disconnect SSE when leaving page
+window.addEventListener('beforeunload', () => {
+    disconnectSSE();
+});
+
+// ============================================================================
+// Global Error Handling
+// ============================================================================
+
+// Global error handler for uncaught exceptions
+window.addEventListener('error', (event) => {
+    console.error('Global error caught:', event.error);
+
+    // Show user-friendly error message
+    showNotification(
+        '应用程序错误',
+        '发生了一个错误。如果问题持续存在，请刷新页面。',
+        'error'
+    );
+
+    // Log error to backend for debugging
+    fetch('/api/log-client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: event.error?.message || 'Unknown error',
+            stack: event.error?.stack || '',
+            url: window.location.href,
+            timestamp: new Date().toISOString(),
+            filename: event.filename,
+            lineno: event.lineno,
+            colno: event.colno
+        })
+    }).catch(() => {
+        // Silently fail if error logging fails (to avoid infinite loop)
+        console.warn('Failed to log error to backend');
+    });
+});
+
+// Handle unhandled promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+    console.error('Unhandled promise rejection:', event.reason);
+
+    // Show user-friendly error message
+    showNotification(
+        '操作失败',
+        event.reason?.message || '请检查网络连接后重试',
+        'error'
+    );
+
+    // Log to backend
+    fetch('/api/log-client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: `Unhandled promise rejection: ${event.reason?.message || event.reason}`,
+            stack: event.reason?.stack || '',
+            url: window.location.href,
+            timestamp: new Date().toISOString()
+        })
+    }).catch(() => {
+        console.warn('Failed to log promise rejection to backend');
+    });
+});
+
+// ============================================================================
+// Log Rendering Performance Optimization
+// ============================================================================
+
+// Maximum number of lines to display in log viewer
+const MAX_LOG_LINES = 1000;
+let logBuffer = [];
+
+/**
+ * Append log lines with automatic truncation for performance
+ * @param {string[]} newLines - Array of new log lines to append
+ */
+function appendLogLinesOptimized(newLines) {
+    if (!Array.isArray(newLines)) {
+        newLines = [newLines];
+    }
+
+    // Add new lines to buffer
+    logBuffer = logBuffer.concat(newLines);
+
+    // Truncate to keep only last MAX_LOG_LINES
+    if (logBuffer.length > MAX_LOG_LINES) {
+        const removed = logBuffer.length - MAX_LOG_LINES;
+        logBuffer = logBuffer.slice(-MAX_LOG_LINES);
+
+        // Add truncation notice at the top
+        console.info(`Log truncated: ${removed} oldest lines removed (keeping last ${MAX_LOG_LINES})`);
+    }
+
+    // Render to DOM
+    const logContent = document.getElementById('logContent');
+    if (logContent) {
+        logContent.textContent = logBuffer.join('\n');
+
+        // Auto-scroll if enabled
+        const autoScrollToggle = document.getElementById('autoScrollToggle');
+        if (autoScrollToggle && autoScrollToggle.checked) {
+            logContent.scrollTop = logContent.scrollHeight;
+        }
+    }
+}
+
+// Export for use in other parts of the app
+window.appendLogLinesOptimized = appendLogLinesOptimized;
