@@ -1012,6 +1012,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 检查后端连接
     const connected = await checkBackendConnection();
     if (connected) {
+        // 加载可用模型列表
+        await loadAvailableModels();
+
         loadConversations();
         setupEventListeners();
         setupMarkdown();
@@ -1043,6 +1046,50 @@ async function checkBackendConnection() {
         console.error('Backend connection failed:', error);
         showConnectionError('无法连接到后端服务，请确保服务已启动');
         return false;
+    }
+}
+
+// 加载可用模型列表
+async function loadAvailableModels() {
+    try {
+        const response = await fetch('/api/models', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) {
+            console.error('Failed to fetch models:', response.status);
+            return;
+        }
+
+        const models = await response.json();
+        const modelSelect = document.getElementById('modelSelect');
+
+        if (modelSelect && models.length > 0) {
+            // 保存当前选中的模型
+            const currentModel = modelSelect.value;
+
+            // 清空并重新填充
+            modelSelect.innerHTML = '';
+
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                modelSelect.appendChild(option);
+            });
+
+            // 恢复之前的选择，或默认第一个
+            if (currentModel && models.includes(currentModel)) {
+                modelSelect.value = currentModel;
+            } else if (models.length > 0) {
+                modelSelect.value = models[0];
+            }
+
+            console.log(`✅ 加载了 ${models.length} 个模型:`, models);
+        }
+    } catch (error) {
+        console.error('Error loading models:', error);
     }
 }
 
@@ -2128,6 +2175,14 @@ function showDSMCControlPanel() {
     const panel = document.getElementById('dsmcControlPanel');
     if (panel) {
         panel.classList.remove('disabled');
+        panel.setAttribute('data-status', 'active');
+
+        // 启用运行按钮
+        const runBtn = document.getElementById('runSimulationBtn');
+        if (runBtn) {
+            runBtn.disabled = false;
+            runBtn.title = '运行仿真';
+        }
     }
     // 刷新监控数据
     if (dsmcSession) {
@@ -2141,6 +2196,14 @@ function hideDSMCControlPanel() {
     const panel = document.getElementById('dsmcControlPanel');
     if (panel) {
         panel.classList.add('disabled');
+        panel.setAttribute('data-status', 'inactive');
+
+        // 禁用运行按钮（但保持模板选择器可用）
+        const runBtn = document.getElementById('runSimulationBtn');
+        if (runBtn) {
+            runBtn.disabled = true;
+            runBtn.title = '请先创建DSMC会话';
+        }
     }
     stopMonitoring();
 }
@@ -2259,12 +2322,12 @@ function displayParameterForm() {
                         <div class="param-row">
                             <label>大气模型</label>
                             <select id="atmosphereModel" name="atmosphereModel" onchange="onAtmosphereModelChange()">
-                                <option value="ISA" selected>ISA 标准大气</option>
-                                <option value="US76">US76 标准大气</option>
+                                <option value="ISA">ISA 标准大气</option>
+                                <option value="US76" selected>US76 标准大气</option>
                                 <option value="NRLMSISE00">NRLMSISE-00</option>
                                 <option value="custom">自定义</option>
                             </select>
-                            <span class="tooltip-icon" title="ISA适用于0-86km，NRLMSISE-00适用于高层大气">?</span>
+                            <span class="tooltip-icon" title="US76适用于0-1000km，ISA适用于0-86km，NRLMSISE-00适用于高层大气">?</span>
                         </div>
                         <div class="atmosphere-preview" id="atmospherePreview">
                             <div class="preview-header">
@@ -5837,73 +5900,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 // Settings Modal Management (Phase 1 - UI only, no backend yet)
 
-function openSettingsModal() {
-    document.getElementById('settingsModalOverlay').classList.remove('hidden');
-    // TODO: Load current settings in Phase 5
-}
-
-function closeSettingsModal() {
-    document.getElementById('settingsModalOverlay').classList.add('hidden');
-}
-
-function saveSettings() {
-    alert('Settings save will be implemented in Phase 5');
-    closeSettingsModal();
-}
-
-function testConnection() {
-    const btn = document.getElementById('testConnectionBtn');
-    btn.disabled = true;
-    btn.textContent = 'Testing...';
-
-    // Placeholder - will be implemented in Phase 5
-    setTimeout(() => {
-        const status = document.getElementById('connectionStatus');
-        status.classList.remove('hidden');
-        status.className = 'connection-status success';
-        status.textContent = '✅ Connection successful (mock)';
-
-        btn.disabled = false;
-        btn.textContent = 'Test';
-    }, 1000);
-}
-
-// Settings button event listener
-document.getElementById('settingsBtn')?.addEventListener('click', openSettingsModal);
-
-// API key show/hide toggle
-document.getElementById('toggleApiKeyBtn')?.addEventListener('click', function() {
-    const input = document.getElementById('apiKey');
-    if (input.type === 'password') {
-        input.type = 'text';
-        this.textContent = '🙈';
-    } else {
-        input.type = 'password';
-        this.textContent = '👁️';
-    }
-});
-
-// Close settings modal with Escape key
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        const overlay = document.getElementById('settingsModalOverlay');
-        if (overlay && !overlay.classList.contains('hidden')) {
-            closeSettingsModal();
-        }
-    }
-});
-
-// Close settings modal by clicking overlay
-document.addEventListener('DOMContentLoaded', () => {
-    const overlay = document.getElementById('settingsModalOverlay');
-    if (overlay) {
-        overlay.addEventListener('click', (e) => {
-            if (e.target.id === 'settingsModalOverlay') {
-                closeSettingsModal();
-            }
-        });
-    }
-});
+// Settings button event listener - uses settings-panel.js implementation
+document.getElementById('settingsBtn')?.addEventListener('click', openSettingsPanel);
 
 // Disconnect SSE when leaving page
 window.addEventListener('beforeunload', () => {

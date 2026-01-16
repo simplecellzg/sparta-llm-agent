@@ -106,6 +106,33 @@ API_KEY = os.getenv('API_KEY', '')
 PORT = int(os.getenv('PORT', 21000))
 MODELS = os.getenv('MODELS', 'claude-opus-4-5-20251001,gemini-3-pro-preview,deepseek-v3-250324').split(',')
 
+
+def validate_env_config():
+    """Validate environment configuration on startup"""
+    errors = []
+
+    # Check API_KEY
+    if not API_KEY or API_KEY != API_KEY.strip():
+        errors.append("API_KEY contains whitespace or is empty")
+
+    # Check API_URL uses HTTPS
+    if not API_URL.startswith('https://'):
+        errors.append("API_URL should use HTTPS")
+
+    # Check MODELS list not empty
+    if len(MODELS) == 0 or (len(MODELS) == 1 and MODELS[0].strip() == ''):
+        errors.append("MODELS list is empty")
+
+    if errors:
+        logger.error("❌ 配置验证失败:")
+        for error in errors:
+            logger.error(f"  - {error}")
+        return False
+
+    logger.info("✅ 配置验证通过")
+    return True
+
+
 # 数据存储路径
 DATA_DIR = Path('data')
 DATA_DIR.mkdir(exist_ok=True)
@@ -971,7 +998,10 @@ def chat():
             api_messages.append({"role": "assistant", "content": msg['content']})
 
     logger.info(f"📤 调用LLM API: {API_URL}")
+    logger.info(f"  模型: {model}")
     logger.info(f"  历史消息数: {len(api_messages)}")
+    logger.info(f"  API密钥前缀: {API_KEY[:15]}..." if len(API_KEY) >= 15 else "  API密钥: (too short)")
+    logger.info(f"  完整端点: {API_URL}/chat/completions")
 
     def generate():
         try:
@@ -989,6 +1019,13 @@ def chat():
                 stream=True,
                 timeout=120
             )
+
+            # Check for HTTP errors (401, 403, etc.)
+            if response.status_code != 200:
+                error_text = response.text[:500]  # Limit error message length
+                logger.error(f"❌ API returned {response.status_code}: {error_text}")
+                yield f"data: {json.dumps({'type': 'error', 'error': f'API returned {response.status_code}: {error_text}'})}\n\n"
+                return
 
             full_response = ""
             chunk_count = 0
@@ -1025,6 +1062,12 @@ def chat():
 
             yield f"data: {json.dumps({'type': 'done', 'done': True})}\n\n"
 
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ LLM API请求失败: {str(e)}", exc_info=True)
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"  响应状态码: {e.response.status_code}")
+                logger.error(f"  响应内容: {e.response.text[:500]}")
+            yield f"data: {json.dumps({'type': 'error', 'error': f'API请求失败: {str(e)}'})}\n\n"
         except Exception as e:
             logger.error(f"❌ LLM调用失败: {str(e)}", exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
@@ -2194,6 +2237,9 @@ def get_settings():
             else:
                 masked_settings[key] = value
 
+        # Add MODELS list (from app config, not .env)
+        masked_settings['MODELS'] = ','.join(MODELS)
+
         return jsonify({
             "settings": masked_settings,
             "editable_keys": [
@@ -2352,6 +2398,12 @@ def after_request(response):
 
 
 if __name__ == '__main__':
+    # Validate configuration before starting server
+    if not validate_env_config():
+        logger.error("❌ 配置验证失败，请检查.env文件")
+        logger.error("   服务器未启动，请修复配置错误后重试")
+        sys.exit(1)
+
     logger.info("=" * 80)
     logger.info("🚀 启动LLM聊天应用服务器")
     logger.info("=" * 80)

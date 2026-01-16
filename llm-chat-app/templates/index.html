@@ -71,9 +71,7 @@
                 <div class="model-selector">
                     <label for="modelSelect">模型</label>
                     <select id="modelSelect">
-                        {% for model in models %}
-                        <option value="{{ model }}">{{ model }}</option>
-                        {% endfor %}
+                        <!-- 模型列表将通过JavaScript动态加载 -->
                     </select>
                 </div>
                 <div class="rag-toggle">
@@ -183,10 +181,24 @@
         </main>
 
         <!-- DSMC综合控制面板 - 右侧（合并运行控制和文件监控） -->
-        <aside class="dsmc-control-panel disabled" id="dsmcControlPanel">
+        <aside class="dsmc-control-panel disabled" id="dsmcControlPanel" data-status="inactive">
             <div class="control-panel-header">
                 <h4>🚀 DSMC控制面板</h4>
                 <button class="panel-close-btn" onclick="hideDSMCControlPanel()" title="关闭">×</button>
+            </div>
+
+            <!-- 模板选择区域 -->
+            <div class="control-section">
+                <div class="section-header">
+                    <h5>📋 预设模板</h5>
+                </div>
+                <div class="template-selector-group">
+                    <select id="templateSelect" class="form-select" onchange="loadTemplate()">
+                        <option value="">-- Select Template --</option>
+                        <!-- Will be populated by JavaScript -->
+                    </select>
+                    <p class="template-description" id="templateDescription"></p>
+                </div>
             </div>
 
             <!-- 运行控制区域 -->
@@ -374,103 +386,179 @@
                 <button onclick="validateAndRunDirectly()" class="btn-modal-primary" id="runDirectlyBtn">🚀 直接运行</button>
             </div>
         </div>
-    </div>
 
-    <!-- Settings Modal -->
-    <div id="settingsModalOverlay" class="modal-overlay hidden">
-        <div id="settingsModal" class="settings-modal">
+        <!-- Iteration Comparison Modal -->
+        <div id="iterationComparisonModal" class="custom-modal modal-large hidden">
             <div class="modal-header">
-                <h3>⚙️ Settings</h3>
-                <button class="modal-close-btn" onclick="closeSettingsModal()">×</button>
+                <h3>🔍 版本对比</h3>
+                <button class="modal-close-btn" onclick="closeComparisonModal()">×</button>
             </div>
+            <div class="modal-body">
+                <!-- Comparison Selector -->
+                <div class="comparison-selector">
+                    <div class="selector-group">
+                        <label>版本 A:</label>
+                        <select id="comparisonIterA" class="form-input"></select>
+                    </div>
+                    <div class="selector-group">
+                        <label>版本 B:</label>
+                        <select id="comparisonIterB" class="form-input"></select>
+                    </div>
+                    <button onclick="loadComparison()" class="btn-modal-primary">加载对比</button>
+                </div>
 
-            <div class="modal-body settings-body">
+                <!-- Comparison Content (Initially Hidden) -->
+                <div id="comparisonContent" class="comparison-content hidden">
+                    <!-- Metadata Comparison -->
+                    <div class="comparison-section">
+                        <h4>基本信息对比</h4>
+                        <table class="comparison-table">
+                            <thead>
+                                <tr>
+                                    <th>属性</th>
+                                    <th id="headerIterA">版本 A</th>
+                                    <th id="headerIterB">版本 B</th>
+                                </tr>
+                            </thead>
+                            <tbody id="metadataComparisonBody">
+                                <!-- Populated by JavaScript -->
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Input File Diff -->
+                    <div class="comparison-section">
+                        <h4>输入文件差异</h4>
+                        <div id="inputFileDiff" class="diff-container">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <!-- Results Comparison -->
+                    <div id="resultsComparisonSection" class="comparison-section hidden">
+                        <h4>运行结果对比</h4>
+                        <div id="resultsComparison" class="results-comparison">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeComparisonModal()" class="btn-modal-secondary">关闭</button>
+                <button onclick="exportComparison()" class="btn-modal-primary">📥 导出对比报告</button>
+            </div>
+        </div>
+
+        <!-- Settings Panel Modal -->
+        <div id="settingsPanel" class="custom-modal modal-large hidden">
+            <div class="modal-header">
+                <h3>⚙️ 系统设置</h3>
+                <button class="modal-close-btn" onclick="closeSettingsPanel()">×</button>
+            </div>
+            <div class="modal-body">
                 <!-- API Configuration Section -->
                 <div class="settings-section">
-                    <h4>🔑 API Configuration</h4>
-
-                    <div class="form-group">
-                        <label for="apiUrl">API URL:</label>
-                        <input type="text" id="apiUrl" class="form-input" placeholder="https://api.example.com/v1">
-                    </div>
-
-                    <div class="form-group">
-                        <label for="apiKey">API Key:</label>
-                        <div class="api-key-group">
-                            <input type="password" id="apiKey" class="form-input" placeholder="sk-...">
-                            <button id="toggleApiKeyBtn" class="btn-icon-small" title="Show/Hide">👁️</button>
-                            <button id="testConnectionBtn" class="btn-secondary-sm" onclick="testConnection()">Test</button>
+                    <h4>🔌 API配置</h4>
+                    <div class="settings-grid">
+                        <div class="setting-item">
+                            <label for="settingApiUrl">API地址</label>
+                            <input type="text" id="settingApiUrl" placeholder="https://api.example.com/v1">
                         </div>
-                        <div id="connectionStatus" class="connection-status hidden"></div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="llmModel">Default Model:</label>
-                        <select id="llmModel" class="form-select">
-                            <option value="claude-opus-4-5-20251101">claude-opus-4-5-20251101</option>
-                            <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-                            <option value="deepseek-v3-250324">deepseek-v3-250324</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- Appearance Section -->
-                <div class="settings-section">
-                    <h4>🎨 Appearance</h4>
-
-                    <div class="form-group">
-                        <label>Theme:</label>
-                        <div class="radio-group">
-                            <label class="radio-label">
-                                <input type="radio" name="theme" value="dark" checked>
-                                <span>Dark</span>
-                            </label>
-                            <label class="radio-label">
-                                <input type="radio" name="theme" value="light">
-                                <span>Light</span>
-                            </label>
+                        <div class="setting-item">
+                            <label for="settingApiKey">API密钥</label>
+                            <div class="input-with-action">
+                                <input type="password" id="settingApiKey" placeholder="sk-...">
+                                <button class="btn-toggle-visibility" onclick="toggleApiKeyVisibility()">👁️</button>
+                            </div>
+                        </div>
+                        <div class="setting-item">
+                            <label for="settingLlmModel">LLM模型</label>
+                            <select id="settingLlmModel">
+                                <!-- 动态从MODELS配置加载 -->
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <button onclick="testApiConnection()" class="btn-test-connection">
+                                🔗 测试连接
+                            </button>
+                            <span id="connectionStatus" class="connection-status hidden"></span>
                         </div>
                     </div>
                 </div>
 
-                <!-- DSMC Defaults Section -->
+                <!-- Runtime Parameters Section -->
                 <div class="settings-section">
-                    <h4>🚀 DSMC Defaults</h4>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="defaultCores">CPU Cores:</label>
-                            <input type="number" id="defaultCores" class="form-input-sm" value="4" min="1" max="128">
+                    <h4>⚡ 运行参数</h4>
+                    <div class="settings-grid">
+                        <div class="setting-item">
+                            <label for="settingMaxTokens">最大Tokens</label>
+                            <input type="number" id="settingMaxTokens" value="4096" min="1024" max="16384" step="1024">
                         </div>
-
-                        <div class="form-group">
-                            <label for="defaultSteps">Max Steps:</label>
-                            <input type="number" id="defaultSteps" class="form-input-sm" value="1000" min="100">
+                        <div class="setting-item">
+                            <label for="settingTemperature">Temperature</label>
+                            <input type="number" id="settingTemperature" value="0.7" min="0" max="1" step="0.1">
+                        </div>
+                        <div class="setting-item">
+                            <label for="settingMaxSteps">默认仿真步数</label>
+                            <input type="number" id="settingMaxSteps" value="1000" min="100" max="100000" step="100">
+                        </div>
+                        <div class="setting-item">
+                            <label for="settingNumCores">默认CPU核数</label>
+                            <input type="number" id="settingNumCores" value="4" min="1" max="128">
                         </div>
                     </div>
+                </div>
 
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="defaultMemory">Memory (GB):</label>
-                            <input type="number" id="defaultMemory" class="form-input-sm" value="100" min="1">
+                <!-- RAG Configuration Section -->
+                <div class="settings-section">
+                    <h4>🔍 RAG配置</h4>
+                    <div class="settings-grid">
+                        <div class="setting-item">
+                            <label>
+                                <input type="checkbox" id="settingRagEnabled">
+                                启用RAG检索
+                            </label>
                         </div>
+                        <div class="setting-item">
+                            <label for="settingRagTopK">Top-K结果数</label>
+                            <input type="number" id="settingRagTopK" value="5" min="1" max="20">
+                        </div>
+                    </div>
+                </div>
 
-                        <div class="form-group">
-                            <label for="defaultFixAttempts">Fix Attempts:</label>
-                            <input type="number" id="defaultFixAttempts" class="form-input-sm" value="3" min="0" max="10">
-                        </div>
+                <!-- Persistence Options -->
+                <div class="settings-section">
+                    <h4>💾 保存选项</h4>
+                    <div class="persist-options">
+                        <label class="radio-option">
+                            <input type="radio" name="persistMode" value="runtime" checked>
+                            <div class="option-details">
+                                <strong>运行时保存</strong>
+                                <p>保存到settings.json，重启后恢复默认</p>
+                            </div>
+                        </label>
+                        <label class="radio-option">
+                            <input type="radio" name="persistMode" value="permanent">
+                            <div class="option-details">
+                                <strong>永久保存</strong>
+                                <p>写入.env文件，永久生效</p>
+                            </div>
+                        </label>
                     </div>
                 </div>
             </div>
-
             <div class="modal-footer">
-                <button onclick="closeSettingsModal()" class="btn-secondary">Cancel</button>
-                <button onclick="saveSettings()" class="btn-primary">Save Settings</button>
+                <button onclick="closeSettingsPanel()" class="btn-modal-secondary">取消</button>
+                <button onclick="resetSettingsToDefault()" class="btn-modal-warning">重置默认</button>
+                <button onclick="saveSettings()" class="btn-modal-primary">💾 保存设置</button>
             </div>
         </div>
     </div>
 
     <script src="{{ url_for('static', filename='components/theme-manager.js') }}"></script>
+    <script src="{{ url_for('static', filename='components/comparison-modal.js') }}"></script>
+    <script src="{{ url_for('static', filename='components/version-manager.js') }}"></script>
+    <script src="{{ url_for('static', filename='components/settings-panel.js') }}?v=20260115a"></script>
     <script src="{{ url_for('static', filename='app.js') }}?v=20260113a"></script>
 </body>
 </html>
