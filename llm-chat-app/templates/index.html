@@ -461,6 +461,13 @@
                     <h4>🔌 API配置</h4>
                     <div class="settings-grid">
                         <div class="setting-item">
+                            <label for="settingApiType">API类型</label>
+                            <div class="radio-group">
+                                <label><input type="radio" name="apiType" value="openai" checked> OpenAI兼容</label>
+                                <label><input type="radio" name="apiType" value="anthropic"> Anthropic</label>
+                            </div>
+                        </div>
+                        <div class="setting-item">
                             <label for="settingApiUrl">API地址</label>
                             <input type="text" id="settingApiUrl" placeholder="https://api.example.com/v1">
                         </div>

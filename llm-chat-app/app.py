@@ -68,6 +68,9 @@ from sse_manager import sse_manager
 # Import config manager
 from config_manager import get_config_manager
 
+# Import API utilities
+from api_utils import mask_api_key, test_api_connection
+
 # 延迟导入DSMC模块（避免循环依赖）
 dsmc_agent_instance = None
 dsmc_detector_instance = None
@@ -2224,16 +2227,13 @@ def get_settings():
         config = get_config_manager()
         settings = config.get_all()
 
-        # Mask sensitive keys
+        # Mask sensitive keys using mask_api_key function
         masked_settings = {}
         sensitive_keys = ['API_KEY', 'TOKEN', 'SECRET', 'PASSWORD']
 
         for key, value in settings.items():
             if any(sensitive in key.upper() for sensitive in sensitive_keys):
-                if len(value) > 8:
-                    masked_settings[key] = value[:8] + '...'
-                else:
-                    masked_settings[key] = '***'
+                masked_settings[key] = mask_api_key(value)
             else:
                 masked_settings[key] = value
 
@@ -2243,7 +2243,7 @@ def get_settings():
         return jsonify({
             "settings": masked_settings,
             "editable_keys": [
-                'API_URL', 'LLM_MODEL', 'RAG_ENABLED', 'MAX_TOKENS',
+                'API_URL', 'API_TYPE', 'LLM_MODEL', 'RAG_ENABLED', 'MAX_TOKENS',
                 'DEFAULT_TEMPERATURE', 'DEFAULT_MAX_STEPS'
             ]
         })
@@ -2296,7 +2296,7 @@ def update_settings():
 
 
 @app.route('/api/settings/test-connection', methods=['POST'])
-def test_api_connection():
+def test_api_connection_endpoint():
     """Test API connection with provided or current credentials"""
     try:
         data = request.get_json() or {}
@@ -2306,47 +2306,24 @@ def test_api_connection():
         api_url = data.get('API_URL') or config.get('API_URL')
         api_key = data.get('API_KEY') or config.get('API_KEY')
         model = data.get('LLM_MODEL') or config.get('LLM_MODEL')
+        api_type = data.get('API_TYPE') or config.get('API_TYPE', 'openai')
 
-        # Test with a minimal API call
-        import requests
-        headers = {
-            'x-api-key': api_key,
-            'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json'
-        }
+        # Call the test function from api_utils
+        result = test_api_connection(
+            api_url=api_url,
+            api_key=api_key,
+            model=model,
+            api_type=api_type
+        )
 
-        # Simple test: send minimal message
-        test_url = f"{api_url.rstrip('/')}/messages"
-        payload = {
-            'model': model,
-            'max_tokens': 10,
-            'messages': [{'role': 'user', 'content': 'test'}]
-        }
-
-        response = requests.post(test_url, headers=headers, json=payload, timeout=10)
-
-        if response.status_code == 200:
-            return jsonify({
-                "success": True,
-                "message": "API connection successful",
-                "model": model
-            })
+        if result['success']:
+            return jsonify(result)
         else:
-            return jsonify({
-                "success": False,
-                "error": f"API returned {response.status_code}: {response.text[:200]}"
-            }), 400
+            return jsonify(result), 400
 
-    except requests.exceptions.Timeout:
-        return jsonify({
-            "success": False,
-            "error": "Connection timeout - check API_URL"
-        }), 400
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 400
+        logger.error(f"Error testing API connection: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/log-client-error', methods=['POST'])

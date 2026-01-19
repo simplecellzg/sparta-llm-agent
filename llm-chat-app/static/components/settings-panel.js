@@ -36,6 +36,13 @@ class SettingsPanel {
         const defaultModel = modelsList.length > 0 ? modelsList[0].trim() : 'claude-opus-4-5-20251101';
 
         // API Configuration
+        // API Type
+        const apiType = settings.API_TYPE || 'openai';
+        const apiTypeRadios = document.querySelectorAll('input[name="apiType"]');
+        apiTypeRadios.forEach(radio => {
+            radio.checked = radio.value === apiType;
+        });
+
         document.getElementById('settingApiUrl').value = settings.API_URL || '';
         document.getElementById('settingApiKey').value = settings.API_KEY || '';
 
@@ -68,6 +75,7 @@ class SettingsPanel {
 
     collectFormData() {
         return {
+            API_TYPE: document.querySelector('input[name="apiType"]:checked').value,
             API_URL: document.getElementById('settingApiUrl').value.trim(),
             API_KEY: document.getElementById('settingApiKey').value.trim(),
             LLM_MODEL: document.getElementById('settingLlmModel').value,
@@ -114,6 +122,7 @@ class SettingsPanel {
     }
 
     async testConnection() {
+        const apiType = document.querySelector('input[name="apiType"]:checked').value;
         const apiUrl = document.getElementById('settingApiUrl').value.trim();
         const apiKey = document.getElementById('settingApiKey').value.trim();
         const model = document.getElementById('settingLlmModel').value;
@@ -132,7 +141,7 @@ class SettingsPanel {
             const response = await fetch('/api/settings/test-connection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ API_URL: apiUrl, API_KEY: apiKey, LLM_MODEL: model })
+                body: JSON.stringify({ API_TYPE: apiType, API_URL: apiUrl, API_KEY: apiKey, LLM_MODEL: model })
             });
 
             const data = await response.json();

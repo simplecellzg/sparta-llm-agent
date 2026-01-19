@@ -394,11 +394,6 @@ function loadTemplate() {
     const geometrySelect = document.getElementById('geometry');
     if (geometrySelect) geometrySelect.value = params.geometry;
 
-    // Grid size
-    document.getElementById('gridX').value = params.grid_size[0];
-    document.getElementById('gridY').value = params.grid_size[1];
-    document.getElementById('gridZ').value = params.grid_size[2];
-
     // Gas properties
     const gasSelect = document.getElementById('gas');
     if (gasSelect) gasSelect.value = params.gas;
