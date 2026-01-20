@@ -93,3 +93,14 @@ class TestSPARTAManualSearcher:
         assert "Example" in formatted or "example" in formatted
         assert "geometry" in formatted or "Geometry" in formatted
         assert len(formatted) > 100  # Should be substantial
+
+    def test_extract_syntax_with_none(self):
+        """Test extract_syntax handles None input"""
+        syntax = self.searcher.extract_syntax(None)
+        assert syntax == {"commands": []}
+
+    def test_extract_syntax_with_malformed_json(self):
+        """Test extract_syntax handles malformed JSON gracefully"""
+        syntax = self.searcher.extract_syntax("not valid json {{{")
+        assert isinstance(syntax, dict)
+        assert isinstance(syntax["commands"], list)

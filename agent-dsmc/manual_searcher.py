@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import time
 import requests
 import json
+import re
 
 # Add lightrag agent to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "agent-lightrag-app"))
@@ -79,6 +80,10 @@ class SPARTAManualSearcher:
     # Default topk parameters (will be optimized through testing)
     DEFAULT_TOPK = 25
     DEFAULT_CHUNK_TOPK = 12
+
+    # Named constants for magic numbers
+    SPEED_OF_SOUND_M_S = 340  # m/s at sea level, 15°C
+    MAX_CONTENT_LENGTH = 2000  # Characters for LLM prompt
 
     def __init__(self, topk: int = None, chunk_topk: int = None):
         """
@@ -166,7 +171,7 @@ class SPARTAManualSearcher:
         velocity = parameters.get("velocity", 1000)
 
         # Determine flow type from velocity
-        flow_type = "supersonic" if velocity > 340 else "subsonic"
+        flow_type = "supersonic" if velocity > self.SPEED_OF_SOUND_M_S else "subsonic"
 
         results = {}
 
@@ -187,6 +192,25 @@ class SPARTAManualSearcher:
 
         return results
 
+    def _parse_document_chunks(self, response_text: str) -> List[str]:
+        """Extract document chunk contents from LightRAG response"""
+        chunks_match = re.search(
+            r'Document Chunks.*?:.*?```json\s*(.*?)\s*```',
+            response_text,
+            re.DOTALL
+        )
+        if not chunks_match:
+            return []
+
+        contents = []
+        for line in chunks_match.group(1).strip().split('\n'):
+            try:
+                chunk = json.loads(line.strip())
+                contents.append(chunk.get('content', ''))
+            except json.JSONDecodeError:
+                continue
+        return contents
+
     def extract_syntax(self, search_result: str) -> Dict:
         """
         Extract SPARTA command syntax from search result
@@ -200,8 +224,8 @@ class SPARTAManualSearcher:
         if not search_result:
             return {"commands": []}
 
-        import json
-        import re
+        if search_result is None:
+            return {"commands": []}
 
         commands = []
 
@@ -209,27 +233,14 @@ class SPARTAManualSearcher:
             # Parse LightRAG JSON response
             data = json.loads(search_result)
             response_text = data.get('response', search_result)
-        except:
+        except json.JSONDecodeError:
             response_text = search_result
 
-        # Extract document chunks content
-        chunks_match = re.search(
-            r'Document Chunks.*?:.*?```json\s*(.*?)\s*```',
-            response_text,
-            re.DOTALL
-        )
+        # Extract document chunks content using helper method
+        chunk_contents = self._parse_document_chunks(response_text)
 
         # Get full text to search (response + chunk contents)
-        full_text = response_text
-        if chunks_match:
-            chunks_text = chunks_match.group(1)
-            # Parse each line as JSON and extract content
-            for line in chunks_text.strip().split('\n'):
-                try:
-                    chunk = json.loads(line.strip())
-                    full_text += '\n' + chunk.get('content', '')
-                except:
-                    pass
+        full_text = response_text + '\n' + '\n'.join(chunk_contents)
 
         # Extract commands from full text
         # Look for common SPARTA commands
@@ -280,39 +291,25 @@ class SPARTAManualSearcher:
 
         return "\n\n".join(sections)
 
-    def _extract_content(self, search_result: str, max_length: int = 2000) -> str:
+    def _extract_content(self, search_result: str, max_length: int = None) -> str:
         """Extract document chunks content from LightRAG result"""
-        import json
-        import re
+        if max_length is None:
+            max_length = self.MAX_CONTENT_LENGTH
 
         try:
             data = json.loads(search_result)
             response_text = data.get('response', '')
 
-            # Extract document chunks section
-            chunks_match = re.search(
-                r'Document Chunks.*?:.*?```json\s*(.*?)\s*```',
-                response_text,
-                re.DOTALL
-            )
+            # Use helper method to extract chunks
+            chunk_contents = self._parse_document_chunks(response_text)
 
-            if chunks_match:
-                chunks_text = chunks_match.group(1)
-                # Parse each line as JSON and extract content
-                contents = []
-                for line in chunks_text.strip().split('\n'):
-                    try:
-                        chunk = json.loads(line.strip())
-                        contents.append(chunk.get('content', ''))
-                    except:
-                        pass
-
-                full_content = '\n\n'.join(contents)
+            if chunk_contents:
+                full_content = '\n\n'.join(chunk_contents)
                 # Truncate if too long
                 if len(full_content) > max_length:
                     full_content = full_content[:max_length] + "\n\n[...更多内容已省略]"
                 return full_content
-        except:
+        except (json.JSONDecodeError, Exception):
             pass
 
         # Fallback: return truncated raw result
