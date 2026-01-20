@@ -19,6 +19,9 @@ from manual_searcher import search_with_params as real_search_with_params
 class TestTopkOptimization:
     """Test different topk parameters for SPARTA manual searches"""
 
+    # Maximum acceptable query time in seconds
+    MAX_QUERY_TIME_SECONDS = 5.0
+
     # Test configurations: (topk, chunk_topk, description)
     TOPK_CONFIGS = [
         (15, 8, "small"),
@@ -37,7 +40,7 @@ class TestTopkOptimization:
     }
 
     @pytest.mark.parametrize("topk,chunk_topk,config_name", TOPK_CONFIGS)
-    def test_topk_speed(self, topk, chunk_topk, config_name):
+    def test_topk_speed(self, topk, chunk_topk, config_name) -> None:
         """Test search speed for different topk values"""
         query = self.TEST_QUERIES["geometry"]
 
@@ -46,7 +49,7 @@ class TestTopkOptimization:
         elapsed = time.time() - start
 
         # Should complete in reasonable time (< 5 seconds)
-        assert elapsed < 5.0, f"Search too slow: {elapsed:.2f}s"
+        assert elapsed < self.MAX_QUERY_TIME_SECONDS, f"Search too slow: {elapsed:.2f}s"
 
         # Should return results
         assert result is not None
@@ -55,7 +58,7 @@ class TestTopkOptimization:
         print(f"\n{config_name}: topk={topk}, chunk_topk={chunk_topk}, time={elapsed:.3f}s")
 
     @pytest.mark.parametrize("query_type", ["geometry", "collision", "boundary", "output", "example"])
-    def test_search_quality(self, query_type):
+    def test_search_quality(self, query_type) -> None:
         """Test if searches return relevant content for each query type"""
         query = self.TEST_QUERIES[query_type]
 
@@ -82,7 +85,7 @@ class TestTopkOptimization:
         """Helper to search with specific parameters"""
         return real_search_with_params(query, topk, chunk_topk, mode)
 
-    def test_compare_all_configs(self):
+    def test_compare_all_configs(self) -> None:
         """Compare all topk configs across all query types and recommend best"""
         results = []
 

@@ -88,6 +88,10 @@ class SPARTAManualSearcher:
             topk: Top-k entities/relationships to retrieve
             chunk_topk: Top-k document chunks to retrieve
         """
+        if topk is not None and topk <= 0:
+            raise ValueError(f"topk must be positive, got {topk}")
+        if chunk_topk is not None and chunk_topk <= 0:
+            raise ValueError(f"chunk_topk must be positive, got {chunk_topk}")
         self.topk = topk or self.DEFAULT_TOPK
         self.chunk_topk = chunk_topk or self.DEFAULT_CHUNK_TOPK
 
