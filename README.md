@@ -65,6 +65,32 @@
 - **API参考**: 所有端点的详细文档
 - **已知问题**: 问题追踪和修复状态
 
+---
+
+## SPARTA Input Generation with Manual Search
+
+The SPARTA input file generation now integrates LightRAG manual search to ensure syntax correctness and adherence to SPARTA manual specifications.
+
+### Features
+
+- ✅ **Pre-generation manual search**: 5 targeted searches before LLM generation
+- ✅ **Search-based syntax fixing**: Automatic error detection and fixing using manual references
+- ✅ **Optimized performance**: ~3-5 seconds for all manual searches
+- ✅ **High quality output**: Generates syntax-correct input files that run without errors
+
+### Quick Start
+
+See [SPARTA Manual Search Integration Guide](docs/SPARTA-Manual-Search-Integration.md) for details.
+
+### Testing
+
+```bash
+cd agent-dsmc
+python -m pytest tests/ -v
+```
+
+---
+
 ## 目录
 
 - [1. 项目概述](#1-项目概述)
