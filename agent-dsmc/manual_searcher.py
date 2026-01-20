@@ -85,6 +85,23 @@ class SPARTAManualSearcher:
     SPEED_OF_SOUND_M_S = 340  # m/s at sea level, 15°C
     MAX_CONTENT_LENGTH = 2000  # Characters for LLM prompt
 
+    # Required SPARTA commands
+    REQUIRED_COMMANDS = [
+        "dimension",
+        "create_box",
+        "create_grid",
+        "species",
+        "collide",
+        "run"
+    ]
+
+    # Command patterns that need parameters
+    COMMAND_PATTERNS = {
+        "species": r"species\s+\S+\s+\S+",  # species file gas1 [gas2 ...]
+        "collide": r"collide\s+\w+\s+\S+\s+\S+",  # collide vss air air.vss
+        "create_grid": r"create_grid\s+\d+\s+\d+\s+\d+",  # create_grid nx ny nz
+    }
+
     def __init__(self, topk: int = None, chunk_topk: int = None):
         """
         Initialize manual searcher
@@ -316,6 +333,198 @@ class SPARTAManualSearcher:
         if len(search_result) > max_length:
             return search_result[:max_length] + "\n\n[...更多内容已省略]"
         return search_result
+
+    def detect_syntax_errors(self, input_file: str) -> List[str]:
+        """
+        Detect syntax errors in SPARTA input file
+
+        Args:
+            input_file: SPARTA input file content
+
+        Returns:
+            List of error descriptions
+        """
+        errors = []
+        lines = input_file.split('\n')
+        found_commands = set()
+
+        # Check each line
+        for i, line in enumerate(lines, 1):
+            line_stripped = line.strip()
+
+            # Skip comments and empty lines
+            if not line_stripped or line_stripped.startswith('#'):
+                continue
+
+            parts = line_stripped.split()
+            if not parts:
+                continue
+
+            cmd = parts[0]
+            found_commands.add(cmd)
+
+            # Check command patterns
+            if cmd in self.COMMAND_PATTERNS:
+                pattern = self.COMMAND_PATTERNS[cmd]
+                if not re.match(pattern, line_stripped):
+                    errors.append(f"Line {i}: Incomplete {cmd} command - {line_stripped}")
+
+        # Check for required commands
+        for req_cmd in self.REQUIRED_COMMANDS:
+            if req_cmd not in found_commands:
+                errors.append(f"Missing required command: {req_cmd}")
+
+        return errors
+
+    def search_fix(self, error: str, input_file: str) -> Dict:
+        """
+        Search manual for fix to specific syntax error
+
+        Args:
+            error: Error description
+            input_file: Current input file content
+
+        Returns:
+            Dict with search_result and suggested_fix
+        """
+        # Build search query from error
+        if "create_grid" in error.lower():
+            query = "create_grid command syntax parameters nx ny nz examples"
+        elif "collide" in error.lower():
+            query = "collide command vss vhs collision model syntax parameters"
+        elif "species" in error.lower():
+            query = "species command syntax mixture gas species file"
+        elif "boundary" in error.lower():
+            query = "boundary command periodic outflow syntax"
+        else:
+            # Generic command syntax search
+            query = f"{error} SPARTA command syntax"
+
+        # Search manual
+        search_result = self.search(query, mode="local")
+
+        # Extract suggested fix from search result
+        suggested_fix = self._extract_fix_from_search(error, search_result)
+
+        return {
+            "error": error,
+            "search_result": search_result or "",
+            "suggested_fix": suggested_fix
+        }
+
+    def _extract_fix_from_search(self, error: str, search_result: str) -> str:
+        """Extract specific fix suggestion from search result"""
+        if not search_result:
+            return ""
+
+        # Extract commands from search result
+        syntax = self.extract_syntax(search_result)
+        commands = syntax.get("commands", [])
+
+        # Find relevant command
+        if "create_grid" in error.lower():
+            grid_cmds = [c for c in commands if c.startswith("create_grid")]
+            if grid_cmds:
+                return grid_cmds[0]
+            return "create_grid 20 10 10"
+
+        elif "collide" in error.lower():
+            collide_cmds = [c for c in commands if c.startswith("collide")]
+            if collide_cmds:
+                return collide_cmds[0]
+            return "collide vss air air.vss"
+
+        elif "species" in error.lower():
+            species_cmds = [c for c in commands if c.startswith("species")]
+            if species_cmds:
+                return species_cmds[0]
+            return "species air.species N2 O2"
+
+        # Default: return first relevant command if found
+        if commands:
+            return commands[0]
+
+        return ""
+
+    def apply_fix(self, input_file: str, fix_info: Dict) -> str:
+        """
+        Apply suggested fix to input file
+
+        Args:
+            input_file: Current input file
+            fix_info: Dict with error, suggested_fix, and optional insert_after
+
+        Returns:
+            Fixed input file
+        """
+        suggested_fix = fix_info.get("suggested_fix", "")
+        if not suggested_fix:
+            return input_file
+
+        lines = input_file.split('\n')
+        insert_after = fix_info.get("insert_after")
+
+        if insert_after:
+            # Insert after specific command
+            for i, line in enumerate(lines):
+                if insert_after in line:
+                    lines.insert(i + 1, suggested_fix)
+                    break
+        else:
+            # Append before run command or at end
+            run_idx = None
+            for i, line in enumerate(lines):
+                if line.strip().startswith("run"):
+                    run_idx = i
+                    break
+
+            if run_idx:
+                lines.insert(run_idx, suggested_fix)
+            else:
+                lines.append(suggested_fix)
+
+        return '\n'.join(lines)
+
+    def fix_all_errors(self, input_file: str, max_iterations: int = 3) -> tuple:
+        """
+        Fix all detected syntax errors
+
+        Args:
+            input_file: Input file with errors
+            max_iterations: Maximum fix attempts
+
+        Returns:
+            (fixed_input_file, fix_log)
+        """
+        current_file = input_file
+        fix_log = []
+
+        for iteration in range(max_iterations):
+            errors = self.detect_syntax_errors(current_file)
+
+            if not errors:
+                break
+
+            # Fix first error
+            error = errors[0]
+            fix_info = self.search_fix(error, current_file)
+
+            if fix_info.get("suggested_fix"):
+                # Determine where to insert
+                if "create_grid" in error.lower():
+                    fix_info["insert_after"] = "create_box"
+                elif "collide" in error.lower():
+                    fix_info["insert_after"] = "species"
+
+                current_file = self.apply_fix(current_file, fix_info)
+
+                fix_log.append({
+                    "iteration": iteration + 1,
+                    "error": error,
+                    "fix": fix_info["suggested_fix"]
+                })
+
+        return current_file, fix_log
 
 
 def search_with_params(query: str, topk: int, chunk_topk: int, mode: str = "local") -> Optional[str]:
