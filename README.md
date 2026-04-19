@@ -1549,14 +1549,9 @@ results.update(self.new_searcher.search(query))
 
 ---
 
-## 13. 联系与支持
+## 13. 路径与支持
 
 - **项目路径**: `/home/simplecellzg/sparta_llm_agent/agent_code/`
 - **主入口**: `llm-chat-app/app.py`
 - **访问地址**: `http://localhost:21000`
 
----
-
-**版本**: 2.2
-**更新时间**: 2026-02-13
-**状态**: 生产就绪
