@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Pytest
+.pytest_cache/
+
+# Environment variables (may contain API keys)
+.env
+*.env.local
+
+# Large data directories
+experiment_data/
+llm-chat-app/data/
+20260316_add/
+
+# SPARTA source code (too large, ~167MB)
+sparta/
+
+# SPARTA manual PDF
+sparta_manual_md/
+
+# Binary and archive files
+*.zip
+*.tar.gz
+*.whl
+
+# Office documents (large)
+*.docx
+*.doc
+
+# PDF files
+*.pdf
+
+# Log files
+*.log
+log.sparta
+
+# Paper output
+paper_output/
+paper_output_add_figure/
+
+# Docs output (arxiv papers, etc.)
+docs/20260120_output/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files
+data/

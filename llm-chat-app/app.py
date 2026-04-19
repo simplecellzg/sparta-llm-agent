@@ -106,6 +106,7 @@ except ImportError:
 # 配置
 API_URL = os.getenv('API_URL', 'https://api.mjdjourney.cn/v1')
 API_KEY = os.getenv('API_KEY', '')
+API_TYPE = os.getenv('API_TYPE', 'openai')  # 'openai' or 'anthropic'
 PORT = int(os.getenv('PORT', 21000))
 MODELS = os.getenv('MODELS', 'claude-opus-4-5-20251001,gemini-3-pro-preview,deepseek-v3-250324').split(',')
 
@@ -666,6 +667,12 @@ def run_uploaded_file_direct():
         }
     """
     try:
+        # 从配置获取默认值
+        config = get_config_manager()
+        default_num_cores = int(config.get('DEFAULT_NUM_CORES', '4'))
+        default_max_steps = int(config.get('DEFAULT_MAX_STEPS', '1000'))
+        default_max_fix_attempts = int(config.get('DEFAULT_MAX_FIX_ATTEMPTS', '10'))
+
         data = request.get_json()
 
         # Validate required fields
@@ -675,10 +682,10 @@ def run_uploaded_file_direct():
                 return jsonify({"success": False, "error": f"Missing field: {field}"}), 400
 
         temp_id = data['temp_id']
-        num_cores = int(data.get('num_cores', 4))
-        max_steps = int(data.get('max_steps', 1000))
+        num_cores = int(data.get('num_cores', default_num_cores))
+        max_steps = int(data.get('max_steps', default_max_steps))
         max_memory_gb = int(data.get('max_memory_gb', 100))
-        max_fix_attempts = int(data.get('max_fix_attempts', 3))
+        max_fix_attempts = int(data.get('max_fix_attempts', default_max_fix_attempts))
 
         # Read temp file
         temp_file = UPLOADS_DIR / f"{temp_id}.sparta"
@@ -987,7 +994,8 @@ def chat():
         user_msg = {"role": "user", "content": content}
 
     # 构建API请求的消息历史
-    api_messages = []
+    # Add system message for faster response (skip thinking process for glm-5)
+    api_messages = [{"role": "system", "content": "请直接输出结果，不要展示思考过程。"}]
     for msg in conv['messages']:
         if msg['role'] == 'user':
             if msg.get('images'):
@@ -1002,26 +1010,72 @@ def chat():
 
     logger.info(f"📤 调用LLM API: {API_URL}")
     logger.info(f"  模型: {model}")
+    logger.info(f"  API类型: {API_TYPE}")
     logger.info(f"  历史消息数: {len(api_messages)}")
     logger.info(f"  API密钥前缀: {API_KEY[:15]}..." if len(API_KEY) >= 15 else "  API密钥: (too short)")
-    logger.info(f"  完整端点: {API_URL}/chat/completions")
 
     def generate():
         try:
-            response = requests.post(
-                f"{API_URL}/chat/completions",
-                headers={
+            # 根据API类型选择不同的请求格式
+            if API_TYPE == 'anthropic':
+                # Anthropic API 格式
+                endpoint = f"{API_URL.rstrip('/')}/v1/messages"
+                headers = {
+                    "x-api-key": API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                }
+                # 提取 system 消息
+                system_message = None
+                filtered_messages = []
+                for msg in api_messages:
+                    if msg['role'] == 'system':
+                        system_message = msg['content']
+                    else:
+                        filtered_messages.append(msg)
+
+                payload = {
+                    "model": model,
+                    "max_tokens": 4096,
+                    "messages": filtered_messages,
+                    "stream": True
+                }
+                if system_message:
+                    payload["system"] = system_message
+
+                logger.info(f"  完整端点: {endpoint}")
+                logger.info(f"  System消息: {'有' if system_message else '无'}")
+
+                response = requests.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=120
+                )
+            else:
+                # OpenAI 兼容格式
+                endpoint = f"{API_URL.rstrip('/')}/v1/chat/completions"
+                headers = {
                     "Authorization": f"Bearer {API_KEY}",
                     "Content-Type": "application/json"
-                },
-                json={
+                }
+                payload = {
                     "model": model,
                     "messages": api_messages,
-                    "stream": True
-                },
-                stream=True,
-                timeout=120
-            )
+                    "stream": True,
+                    "enable_thinking": False
+                }
+
+                logger.info(f"  完整端点: {endpoint}")
+
+                response = requests.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=120
+                )
 
             # Check for HTTP errors (401, 403, etc.)
             if response.status_code != 200:
@@ -1032,24 +1086,50 @@ def chat():
 
             full_response = ""
             chunk_count = 0
-            for line in response.iter_lines():
-                if line:
-                    line = line.decode('utf-8')
-                    if line.startswith('data: '):
-                        data = line[6:]
-                        if data == '[DONE]':
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            if 'choices' in chunk and len(chunk['choices']) > 0:
-                                delta = chunk['choices'][0].get('delta', {})
-                                if 'content' in delta:
-                                    content = delta['content']
-                                    full_response += content
-                                    chunk_count += 1
-                                    yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
-                        except json.JSONDecodeError:
-                            continue
+
+            if API_TYPE == 'anthropic':
+                # Anthropic 流式响应格式
+                for line in response.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data_str = line[6:]
+                            try:
+                                event = json.loads(data_str)
+                                event_type = event.get('type', '')
+
+                                if event_type == 'content_block_delta':
+                                    delta = event.get('delta', {})
+                                    if delta.get('type') == 'text_delta':
+                                        content = delta.get('text', '')
+                                        if content:
+                                            full_response += content
+                                            chunk_count += 1
+                                            yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+                                elif event_type == 'message_stop':
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+            else:
+                # OpenAI 流式响应格式
+                for line in response.iter_lines():
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith('data: '):
+                            data = line[6:]
+                            if data == '[DONE]':
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                if 'choices' in chunk and len(chunk['choices']) > 0:
+                                    delta = chunk['choices'][0].get('delta', {})
+                                    content = delta.get('content')
+                                    if content:
+                                        full_response += content
+                                        chunk_count += 1
+                                        yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+                            except json.JSONDecodeError:
+                                continue
 
             logger.info(f"✅ LLM响应完成: {len(full_response)} 字符, {chunk_count} 个片段")
 
@@ -1096,7 +1176,8 @@ def chat_with_rag(conv_id, user_message, model, conv):
                 mode="mix",
                 model=model,
                 api_url=API_URL,
-                api_key=API_KEY
+                api_key=API_KEY,
+                api_type=API_TYPE
             ):
                 event_type = event.get('type')
 
@@ -1331,13 +1412,19 @@ def dsmc_generate_input():
 @app.route('/api/dsmc/run', methods=['POST'])
 def dsmc_run_simulation():
     """运行SPARTA仿真（流式）"""
+    # 从配置获取默认值
+    config = get_config_manager()
+    default_num_cores = int(config.get('DEFAULT_NUM_CORES', '4'))
+    default_max_steps = int(config.get('DEFAULT_MAX_STEPS', '1000'))
+    default_max_fix_attempts = int(config.get('DEFAULT_MAX_FIX_ATTEMPTS', '10'))
+
     data = request.json
     session_id = data.get('session_id')
     conversation_id = data.get('conversation_id')  # 对话ID用于保存结果
-    num_cores = data.get('num_cores', 4)
-    max_steps = data.get('max_steps', 1000)
+    num_cores = data.get('num_cores', default_num_cores)
+    max_steps = data.get('max_steps', default_max_steps)
     max_memory_gb = data.get('max_memory_gb', None)  # 内存限制（GB）
-    max_fix_attempts = data.get('max_fix_attempts', 3)  # 最大修复次数
+    max_fix_attempts = data.get('max_fix_attempts', default_max_fix_attempts)  # 最大修复次数
 
     if not session_id:
         logger.error("❌ 缺少session_id参数")

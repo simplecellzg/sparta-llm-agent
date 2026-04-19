@@ -842,7 +842,7 @@ async function runUploadedFile() {
         num_cores: uploadCores ? parseInt(uploadCores.value) : 4,
         max_steps: uploadSteps ? parseInt(uploadSteps.value) : 1000,
         max_memory_gb: uploadMemory ? parseInt(uploadMemory.value) : 100,
-        max_fix_attempts: uploadFix ? parseInt(uploadFix.value) : 3
+        max_fix_attempts: uploadFix ? parseInt(uploadFix.value) : 10
     };
 
     // Validate params
@@ -1014,6 +1014,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         setupEventListeners();
         setupMarkdown();
         loadDSMCTemplates(); // Load DSMC template presets
+
+        // 加载控制面板默认参数
+        loadControlPanelDefaults();
 
         // Attach validation listeners after a short delay to ensure DOM is ready
         setTimeout(() => {
@@ -2165,6 +2168,37 @@ function hideDSMCIndicator() {
     }
 }
 
+// 从后端加载控制面板默认参数
+async function loadControlPanelDefaults() {
+    try {
+        const response = await fetch('/api/settings');
+        if (!response.ok) {
+            console.error('加载设置失败');
+            return;
+        }
+
+        const data = await response.json();
+        const settings = data.settings;
+
+        // 更新控制面板的默认值
+        const numCoresInput = document.getElementById('panelNumCores');
+        const maxStepsInput = document.getElementById('panelMaxSteps');
+        const maxFixAttemptsInput = document.getElementById('panelMaxFixAttempts');
+
+        if (numCoresInput && settings.DEFAULT_NUM_CORES) {
+            numCoresInput.value = settings.DEFAULT_NUM_CORES;
+        }
+        if (maxStepsInput && settings.DEFAULT_MAX_STEPS) {
+            maxStepsInput.value = settings.DEFAULT_MAX_STEPS;
+        }
+        if (maxFixAttemptsInput && settings.DEFAULT_MAX_FIX_ATTEMPTS) {
+            maxFixAttemptsInput.value = settings.DEFAULT_MAX_FIX_ATTEMPTS;
+        }
+    } catch (error) {
+        console.error('加载控制面板默认参数失败:', error);
+    }
+}
+
 // 显示DSMC控制面板（合并后的）
 function showDSMCControlPanel() {
     const panel = document.getElementById('dsmcControlPanel');
@@ -2178,6 +2212,9 @@ function showDSMCControlPanel() {
             runBtn.disabled = false;
             runBtn.title = '运行仿真';
         }
+
+        // 从后端加载默认参数
+        loadControlPanelDefaults();
     }
     // 刷新监控数据
     if (dsmcSession) {
@@ -3398,7 +3435,7 @@ async function runSimulation() {
     const numCores = parseInt(document.getElementById('panelNumCores')?.value) || 4;
     const maxSteps = parseInt(document.getElementById('panelMaxSteps')?.value) || 1000;
     const maxMemoryGB = parseFloat(document.getElementById('panelMaxMemory')?.value) || null;
-    const maxFixAttempts = parseInt(document.getElementById('panelMaxFixAttempts')?.value) || 3;
+    const maxFixAttempts = parseInt(document.getElementById('panelMaxFixAttempts')?.value) || 10;
 
     let confirmMsg = `确定要运行SPARTA仿真吗？\n\nCPU核数: ${numCores}\n最大步数: ${maxSteps}\n最大修复次数: ${maxFixAttempts}`;
     if (maxMemoryGB) {
@@ -5087,7 +5124,7 @@ function generateVersionMD(iteration, versionNum, includeImageRefs = false) {
     mdContent += `- **CPU核数**: ${document.getElementById('panelNumCores')?.value || 4}\n`;
     mdContent += `- **最大步数**: ${document.getElementById('panelMaxSteps')?.value || 1000}\n`;
     mdContent += `- **内存限制**: ${document.getElementById('panelMaxMemory')?.value || 100} GB\n`;
-    mdContent += `- **最大修复次数**: ${document.getElementById('panelMaxFixAttempts')?.value || 3}\n\n`;
+    mdContent += `- **最大修复次数**: ${document.getElementById('panelMaxFixAttempts')?.value || 10}\n\n`;
 
     return mdContent;
 }
@@ -5327,7 +5364,7 @@ async function downloadAllVersionsMD() {
             combinedMD += `- CPU核数: ${document.getElementById('panelNumCores')?.value || 4}\n`;
             combinedMD += `- 最大步数: ${document.getElementById('panelMaxSteps')?.value || 1000}\n`;
             combinedMD += `- 内存限制: ${document.getElementById('panelMaxMemory')?.value || 100} GB\n`;
-            combinedMD += `- 最大修复次数: ${document.getElementById('panelMaxFixAttempts')?.value || 3}\n\n`;
+            combinedMD += `- 最大修复次数: ${document.getElementById('panelMaxFixAttempts')?.value || 10}\n\n`;
 
             zip.file('README.md', combinedMD);
 

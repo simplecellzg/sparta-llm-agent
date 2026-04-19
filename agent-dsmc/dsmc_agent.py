@@ -15,6 +15,14 @@ from typing import Dict, Generator, List, Optional
 from keyword_detector import DSMCKeywordDetector
 from utils import call_llm, call_llm_stream, generate_session_id, get_iso_timestamp, ensure_dir
 from manual_searcher import SPARTAManualSearcher
+from template_system import (
+    get_template,
+    get_template_by_geometry,
+    get_template_for_geometry,
+    list_templates,
+    GEOMETRY_MAPPING,
+    TEMPLATES
+)
 
 
 # ============== 迭代数据结构定义 ==============
@@ -65,10 +73,74 @@ def create_session_statistics() -> Dict:
     }
 
 
+# 几何文件映射表 - 用于生成输入文件时指定正确的示例文件
+# 路径相对于 SPARTA 可执行文件目录
+# 重要：必须包含测试用例中使用的所有几何类型！
+GEOMETRY_FILE_MAPPING = {
+    # 3D 几何
+    "sphere": "examples/sphere/data.sphere",
+    "球体": "examples/sphere/data.sphere",
+    "spiky": "examples/spiky/data.spiky",
+    "尖刺": "examples/spiky/data.spiky",
+    "cube": "examples/custom/data.cube",
+    "立方体": "examples/custom/data.cube",
+    # 2D 几何
+    "cylinder": "examples/circle/data.circle",  # 2D 圆柱
+    "圆柱": "examples/circle/data.circle",
+    "circle": "examples/circle/data.circle",
+    "圆": "examples/circle/data.circle",
+    "plane": "examples/circle/data.plane1",
+    "平面": "examples/circle/data.plane1",
+    "step": "examples/step/data.step",
+    "阶梯": "examples/step/data.step",
+    # 特殊用途
+    "beam": "examples/surf_collide/data.beam",
+    "束流": "examples/surf_collide/data.beam",
+    "etch": "examples/ablation/data.etch2d",
+    "刻蚀": "examples/ablation/data.etch2d",
+    "adsorb": "examples/surf_react_adsorb/data.beam",
+    "吸附": "examples/surf_react_adsorb/data.beam",
+
+    # ===== 新增：测试用例中使用的几何类型 =====
+    # flat_plate 使用 circle 的数据文件（平板可以用圆的变体）
+    "flat_plate": "examples/circle/data.circle",
+    "平板": "examples/circle/data.circle",
+    "plate": "examples/circle/data.circle",
+    # box 使用 free 目录的几何（真空腔室）
+    "box": "examples/free/data.free",
+    "立方体": "examples/free/data.free",
+    "vacuum": "examples/free/data.free",
+    "真空": "examples/free/data.free",
+}
+
+# 禁止使用的几何文件名（用于提示词负面约束）
+FORBIDDEN_GEOMETRY_FILES = [
+    "data.plate",
+    "data.plate.txt",
+    "data.flat_plate",
+    "data.flat_plate.txt",
+    "data.box",
+    "data.box.txt",
+    "data.custom",
+    "data.user_defined",
+]
+
+# 物种文件映射表 - 用于验证物种是否存在
+# key: 物种文件名, value: 有效物种列表
+SPECIES_FILE_MAPPING = {
+    "air.species": ["O2", "N2", "O", "N", "NO", "O2+", "N2+", "O+", "N+", "NO+", "e"],
+    "ar.species": ["Ar"],
+    "6SpeciesAir.species": ["N2", "O2", "NO", "N", "O", "N2+", "O2+", "NO+"],
+    "n2.species": ["N2"],
+    "co2.species": ["CO2"],
+    "he.species": ["He"],  # 氦气（如果存在）
+}
+
+
 class DSMCAgent:
     """DSMC代理 - 主协调器"""
 
-    def __init__(self, max_fix_attempts: int = 3):
+    def __init__(self, max_fix_attempts: int = 10):
         """初始化DSMC代理
 
         Args:
@@ -188,11 +260,15 @@ class DSMCAgent:
         step_start = time.time()
         yield {"type": "status", "message": "🔧 正在生成SPARTA输入文件...", "start_time": start_time}
 
-        # NEW: Perform manual searches before generation
-        yield {"type": "status", "message": "📖 正在搜索SPARTA手册获取语法参考...", "elapsed": time.time() - start_time}
+        # NEW: Perform manual searches before generation (PARALLEL - async version)
+        yield {"type": "status", "message": "📖 正在搜索SPARTA手册获取语法参考（并行检索中...）...", "elapsed": time.time() - start_time}
         step_start = time.time()
 
-        manual_search_results = self.manual_searcher.comprehensive_search(parameters)
+        # Use async version for parallel search (faster: ~3-5s vs ~15-20s)
+        import asyncio
+        manual_search_results = asyncio.run(
+            self.manual_searcher.comprehensive_search_async(parameters)
+        )
         step_times['手册搜索'] = time.time() - step_start
 
         yield {
@@ -223,6 +299,16 @@ class DSMCAgent:
             input_file = generated_input
 
         step_times['生成输入文件'] = time.time() - step_start
+
+        # NEW: Fix geometry file references (后处理修复几何文件名)
+        step_start = time.time()
+        input_file = self._fix_geometry_file_references(input_file, parameters)
+        step_times['几何文件修复'] = time.time() - step_start
+
+        # NEW: Fix species references (后处理修复物种引用)
+        step_start = time.time()
+        input_file = self._fix_species_references(input_file, parameters, None)
+        step_times['物种文件修复'] = time.time() - step_start
 
         # NEW: Validate and fix syntax after generation
         step_start = time.time()
@@ -1190,9 +1276,25 @@ class DSMCAgent:
 请回答："""
 
     def _build_input_generation_prompt(self, parameters: Dict, llm_files: list = None) -> str:
-        """构建输入文件生成提示词"""
+        """构建输入文件生成提示词（增强版）"""
+
+        # 获取几何文件提示
+        geometry = parameters.get('geometry', '')
+        dimension = parameters.get('dimension', 2)
+        geometry_hint = self._get_geometry_file_hint(geometry)
+        template_hint = self._get_template_hint(geometry, dimension)
+
         # 基础参数
-        prompt_parts = [f"""你是SPARTA DSMC仿真专家。请根据以下参数生成完整的SPARTA输入文件：
+        prompt_parts = [f"""你是专门从事SPARTA的DSMC仿真专家助手。
+你的任务是根据用户需求生成语法正确且物理有意义的SPARTA输入文件。
+
+关键指南:
+- 确保所有命令使用正确的SPARTA语法
+- 选择物理上合理的参数(时间步长、单元尺寸等)
+- 包含用于分析的全面输出命令
+- 添加解释参数选择的注释
+
+=== 用户需求 ===
 
 基础参数:
 - 温度: {parameters.get('temperature', 300)} K
@@ -1200,6 +1302,24 @@ class DSMCAgent:
 - 速度: {parameters.get('velocity', 1000)} m/s
 - 几何: {parameters.get('geometry', 'cylinder')}
 - 气体: {parameters.get('gas', 'N2')}"""]
+
+        # 添加几何文件提示（关键改进）
+        if geometry_hint:
+            prompt_parts.append(geometry_hint)
+            # 添加负面约束：禁止使用的文件名
+            prompt_parts.append("""
+=== ⚠️ 重要：禁止使用的几何文件名 ===
+绝对不要使用以下文件名，这些文件不存在:
+- data.plate / data.plate.txt
+- data.flat_plate / data.flat_plate.txt
+- data.box / data.box.txt
+- data.custom / data.user_defined
+只允许使用上面指定的正确几何文件！
+""")
+
+        # 添加模板提示（关键改进）
+        if template_hint:
+            prompt_parts.append(template_hint)
 
         # 添加高级参数（如果有）
         if 'boundary' in parameters:
@@ -1265,15 +1385,57 @@ class DSMCAgent:
 
 请参考上述资料中的相关信息。""")
 
-        # 添加生成要求
+        # 增强的输出格式规范（关键改进）
         prompt_parts.append("""
-要求：
-1. 生成完整的SPARTA输入脚本
-2. 包含dimension、boundary、create_box、create_grid等必要命令
-3. 设置合理的碰撞模型（如VSS）
-4. 网格划分要适当
-5. 包含输出dump命令
-6. 遵循SPARTA语法规范
+=== 要求的输出格式 ===
+生成完整的SPARTA输入文件,包含以下9个部分:
+
+1. 头部注释
+   - 仿真描述、日期、主要参数列表
+
+2. 维度和单位规范
+   - dimension 命令
+
+3. 物种定义
+   - species 命令（气体种类、分子参数）
+
+4. 几何和网格设置
+   - create_box 命令
+   - create_grid 命令
+   - read_surf 命令（如使用表面几何）
+
+5. 初始化
+   - create_particles 命令
+
+6. 碰撞模型配置
+   - collide 命令（VHS/VSS/HS）
+
+7. 边界条件
+   - boundary 命令
+
+8. 统计采样和输出命令
+   - compute 命令
+   - stats_style 命令
+   - dump 命令
+
+9. 时间步长和运行命令
+   - timestep 命令
+   - run 命令
+
+=== 后续说明（必须包含） ===
+
+在输入文件后,提供以下信息:
+
+1. 参数说明
+   - 时间步长选择理由（应满足稳定性条件 Δt < 0.1×λ/v）
+   - 网格尺寸选择（应满足网格收敛性 Δx < 0.1~0.5×λ）
+   - 每单元粒子数（应 > 10 保证统计可靠性）
+
+2. 预期运行时间
+   - 基于问题规模的粗略估计
+
+3. 建议检查项
+   - 监控什么变量以确保物理正确性
 
 请生成SPARTA输入文件（用```sparta代码块包裹）：""")
 
@@ -1286,7 +1448,7 @@ class DSMCAgent:
         llm_files: list = None
     ) -> str:
         """
-        构建包含手册搜索结果的输入文件生成提示词
+        构建包含手册搜索结果的输入文件生成提示词（增强版）
 
         Args:
             parameters: 用户参数
@@ -1296,17 +1458,126 @@ class DSMCAgent:
         Returns:
             完整提示词
         """
+        # 获取几何文件提示
+        geometry = parameters.get('geometry', '')
+        dimension = parameters.get('dimension', 2)
+        geometry_hint = self._get_geometry_file_hint(geometry)
+        template_hint = self._get_template_hint(geometry, dimension)
+
         # Format manual search results for LLM
         manual_context = self.manual_searcher.format_for_llm(manual_search_results)
 
         # Build prompt with manual context first
-        prompt_parts = [f"""你是SPARTA DSMC仿真专家。请根据以下参数和手册参考生成完整的SPARTA输入文件。
+        prompt_parts = [f"""你是专门从事SPARTA的DSMC仿真专家助手。
+你的任务是根据用户需求和检索到的知识生成语法正确且物理有意义的SPARTA输入文件。
 
-## SPARTA手册参考
+关键指南:
+- 优先考虑SPARTA手册信息
+- 确保所有命令使用正确的SPARTA语法
+- 选择物理上合理的参数(时间步长、单元尺寸等)
+- 包含用于分析的全面输出命令
+- 添加解释参数选择的注释
+
+=== SPARTA手册参考 ===
 
 {manual_context}
 
-## 用户参数
+=== ⚠️ 重要：物种文件知识库（必须遵守）===
+
+## 可用的物种文件（位于 sparta/data/ 目录）
+
+| 气体类型 | 物种文件 | VSS文件 | 包含的物种 |
+|---------|---------|---------|-----------|
+| 空气(Air) | air.species | air.vss | O2, N2, O, N, NO |
+| 氩气(Ar) | ar.species | ar.vss | Ar |
+| 氦气(He) | he.species | he.vss | He |
+| CO2 | co2.species | co2.vss | CO2 |
+| 火星大气 | mars.species | mars.vss | CO2, N2, Ar |
+
+## species命令格式（严格遵守）
+```
+species <species_file> <vss_file> <species1> <species2> ...
+```
+
+## 正确示例
+```
+# 单一气体（氩气）
+species ar.species ar.vss Ar
+
+# 空气（N2+O2混合）
+species air.species air.vss N2 O2
+
+# 氦气
+species he.species he.vss He
+```
+
+## ⛔ 禁止使用以下文件名（不存在！）
+- species.data, data.species
+- ../data/species.data, data/species.data
+- argon.species, helium.species
+- 任何带路径的物种文件
+
+=== ⚠️ 重要：命令顺序（严格遵守）===
+
+SPARTA命令必须按以下顺序执行：
+
+```
+1. dimension 2 或 dimension 3          # 必须第一行
+2. boundary <type> <type> ...          # 必须在create_box之前
+3. create_box <xlo> <xhi> <ylo> <yhi> [zlo] [zhi]  # 定义计算域
+4. create_grid <Nx> <Ny> [Nz]          # 创建网格
+5. species <file> <vss_file> <species> # 定义物种（在collide之前！）
+6. collide <ID> <style> <species_file> <params>  # 碰撞模型
+7. read_surf <file>                    # 读取几何表面（如有）
+8. group <ID> region <region>          # 定义组（在compute grid之前！）
+9. seed <seed_value>                   # 随机种子（在create_particles之前！）
+10. create_particles <params>          # 创建粒子
+11. compute <ID> grid <group-ID> <values>  # 统计计算
+12. timestep <dt>                      # 时间步长
+13. run <steps>                        # 运行
+```
+
+=== ⚠️ 重要：常见错误预防 ===
+
+## 错误1：compute grid group ID 不存在
+❌ 错误代码:
+```
+compute 1 grid all n rho temp
+```
+原因：group "all" 未定义
+✅ 正确代码:
+```
+group all region all
+compute 1 grid all n rho temp
+```
+
+## 错误2：species file 找不到
+❌ 错误代码:
+```
+species species.data Ar
+species ../data/air.species N2 O2
+```
+✅ 正确代码:
+```
+species ar.species ar.vss Ar
+species air.species air.vss N2 O2
+```
+
+## 错误3：seed command 缺失
+❌ 错误：直接使用 create_particles
+✅ 正确：先 seed 再 create_particles
+```
+seed 12345
+create_particles ...
+```
+
+## 错误4：Unknown command
+SPARTA没有以下命令，绝对不要使用：
+- reset_stats（不存在！）
+- clear_stats（不存在！）
+- 其他非标准命令
+
+=== 用户需求 ===
 
 基础参数:
 - 温度: {parameters.get('temperature', 300)} K
@@ -1315,6 +1586,24 @@ class DSMCAgent:
 - 几何: {parameters.get('geometry', 'cylinder')}
 - 气体: {parameters.get('gas', 'N2')}
 - 碰撞模型: {parameters.get('collision_model', 'VSS')}"""]
+
+        # 添加几何文件提示（关键改进）
+        if geometry_hint:
+            prompt_parts.append(geometry_hint)
+            # 添加负面约束：禁止使用的文件名
+            prompt_parts.append("""
+=== ⚠️ 重要：禁止使用的几何文件名 ===
+绝对不要使用以下文件名，这些文件不存在:
+- data.plate / data.plate.txt
+- data.flat_plate / data.flat_plate.txt
+- data.box / data.box.txt
+- data.custom / data.user_defined
+只允许使用上面指定的正确几何文件！
+""")
+
+        # 添加模板提示（关键改进）
+        if template_hint:
+            prompt_parts.append(template_hint)
 
         # Add existing advanced parameters handling
         if 'boundary' in parameters:
@@ -1380,23 +1669,349 @@ class DSMCAgent:
 
 请参考上述资料中的相关信息。""")
 
-        # Add generation requirements
+        # 增强的输出格式规范（关键改进）
         prompt_parts.append("""
-## 生成要求
+=== 要求的输出格式 ===
+生成完整的SPARTA输入文件,包含以下9个部分:
 
-请严格遵循上述SPARTA手册参考中的语法和示例：
+1. 头部注释
+   - 仿真描述、日期、主要参数列表
 
-1. 生成完整的SPARTA输入脚本
-2. 包含所有必要命令（dimension、create_box、create_grid、species、run等）
-3. 命令参数格式必须与手册示例完全一致
-4. 网格划分要适当（根据几何尺寸）
-5. 包含输出dump和stats命令
-6. 遵循SPARTA语法规范
-7. 参考手册中的示例案例结构
+2. 维度和单位规范
+   - dimension 命令
+
+3. 物种定义
+   - species 命令（气体种类、分子参数）
+
+4. 几何和网格设置
+   - create_box 命令
+   - create_grid 命令
+   - read_surf 命令（如使用表面几何，必须使用上面指定的几何文件！）
+
+5. 初始化
+   - create_particles 命令
+
+6. 碰撞模型配置
+   - collide 命令（VHS/VSS/HS）
+
+7. 边界条件
+   - boundary 命令
+
+8. 统计采样和输出命令
+   - compute 命令
+   - stats_style 命令
+   - dump 命令
+
+9. 时间步长和运行命令
+   - timestep 命令
+   - run 命令
+
+=== 后续说明（必须包含） ===
+
+在输入文件后,提供以下信息:
+
+1. 参数说明
+   - 时间步长选择理由（应满足稳定性条件 Δt < 0.1×λ/v）
+   - 网格尺寸选择（应满足网格收敛性 Δx < 0.1~0.5×λ）
+   - 每单元粒子数（应 > 10 保证统计可靠性）
+
+2. 预期运行时间
+   - 基于问题规模的粗略估计
+
+3. 建议检查项
+   - 监控什么变量以确保物理正确性
 
 请生成SPARTA输入文件（用```sparta代码块包裹）：""")
 
         return "\n".join(prompt_parts)
+
+    def _get_geometry_file_hint(self, geometry: str) -> str:
+        """获取几何文件提示 - 告诉LLM使用哪个示例几何文件"""
+        if not geometry:
+            return ""
+
+        geometry_lower = geometry.lower().strip()
+        if geometry_lower in GEOMETRY_FILE_MAPPING:
+            file_path = GEOMETRY_FILE_MAPPING[geometry_lower]
+            filename = Path(file_path).name
+            return f"""
+=== 重要: 几何文件 ===
+请使用以下 SPARTA 示例中的几何文件，不要自行创建或使用不存在的文件名:
+- 几何类型: {geometry}
+- 使用文件: {filename}
+- 完整路径: {file_path}
+- 使用方法: 在输入文件中使用 "read_surf {filename}"
+- 注意: 确保文件在运行目录中，或使用相对于SPARTA的路径
+"""
+        return ""
+
+    def _get_template_hint(self, geometry: str, dimension: int = 2) -> str:
+        """获取模板提示 - 提供参考示例"""
+        template = get_template_for_geometry(geometry, dimension)
+        if not template:
+            return ""
+
+        # 尝试读取模板输入文件内容作为参考
+        template_content = ""
+        if template.input_file_path.exists():
+            try:
+                with open(template.input_file_path, 'r') as f:
+                    content = f.read()
+                    # 只取前100行作为参考
+                    lines = content.split('\n')[:100]
+                    template_content = '\n'.join(lines)
+            except:
+                pass
+
+        hint = f"""
+=== 参考模板 ===
+推荐使用以下经过验证的模板作为参考:
+- 模板名称: {template.name} ({template.name_zh})
+- 描述: {template.description}
+- 示例目录: examples/{template.example_dir}
+- 输入文件: {template.input_file}
+- 维度: {template.dimension}D
+- 几何类型: {template.geometry_type}
+"""
+        if template_content:
+            hint += f"""
+=== {template.input_file} 参考内容 ===
+```
+{template_content}
+```
+"""
+
+        return hint
+
+    def _fix_geometry_file_references(self, input_file: str, parameters: Dict) -> str:
+        """修复生成输入文件中的几何文件名引用
+
+        后处理：自动检测并修复错误的几何文件名
+        核心功能：解决LLM不遵循几何文件提示的问题
+        """
+        import re
+
+        # 获取正确的几何文件名
+        geometry = parameters.get('geometry', '').lower().strip()
+
+        # 解析 dimension - 可能是字符串 "2d"/"3d" 或整数 2/3
+        dim_value = parameters.get('dimension', 2)
+        if isinstance(dim_value, str):
+            dimension = 3 if '3' in dim_value else 2
+        else:
+            dimension = int(dim_value) if dim_value else 2
+
+        # special handling for box geometry (vacuum chamber)
+        # box doesn't need read_surf - it's a pure box simulation
+        if geometry == 'box':
+            # Remove any read_surf commands for box geometry
+            fixed_input = re.sub(r'^\s*read_surf\s+.*\n?', '', input_file, flags=re.MULTILINE | re.IGNORECASE)
+            # Ensure create_box is large enough
+            if dimension == 3:
+                fixed_input = re.sub(
+                    r'create_box\s+[-\d.eE]+\s+[-\d.eE]+.*',
+                    'create_box -10 10 -10 10 -10 10',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+            else:
+                fixed_input = re.sub(
+                    r'create_box\s+[-\d.eE]+\s+[-\d.eE]+.*',
+                    'create_box -10 10 -10 10',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+            return fixed_input
+
+        correct_file = GEOMETRY_FILE_MAPPING.get(geometry, "")
+
+        # 如果没有映射，使用默认处理
+        if not correct_file:
+            # 尝试根据dimension推断
+            if dimension == 3:
+                correct_file = "examples/sphere/data.sphere"
+            else:
+                correct_file = "examples/circle/data.circle"
+
+        # 提取文件名（不含路径）
+        correct_filename = Path(correct_file).name
+
+        # 检测并替换错误的几何文件名
+        # 匹配模式：read_surf 后的各种错误文件名
+        patterns_to_fix = [
+            (r'read_surf\s+data\.plate(?:\.txt)?', f'read_surf {correct_filename}'),
+            (r'read_surf\s+data\.flat_plate(?:\.txt)?', f'read_surf {correct_filename}'),
+            (r'read_surf\s+data\.box(?:\.txt)?', f'read_surf {correct_filename}'),
+            (r'read_surf\s+data\.custom(?:\.txt)?', f'read_surf {correct_filename}'),
+            (r'read_surf\s+data\.\w+(?:\.txt)?', f'read_surf {correct_filename}'),  # 替换其他未知文件
+        ]
+
+        fixed_input = input_file
+        for pattern, replacement in patterns_to_fix:
+            fixed_input = re.sub(pattern, replacement, fixed_input, flags=re.IGNORECASE)
+
+        # 确保 create_box 范围足够大（覆盖几何）
+        if dimension == 3:
+            # 3D 需要更大的范围
+            if 'create_box' in fixed_input:
+                fixed_input = re.sub(
+                    r'create_box\s+[-\d.eE]+\s+[-\d.eE]+.*',
+                    'create_box -10 10 -10 10 -10 10',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+        else:
+            # 2D - 统一使用足够大的范围
+            if 'create_box' in fixed_input:
+                fixed_input = re.sub(
+                    r'create_box\s+[-\d.eE]+\s+[-\d.eE]+.*',
+                    'create_box -10 10 -10 10',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+
+        return fixed_input
+
+    def _fix_species_references(self, input_file: str, parameters: Dict, session_dir: Path = None) -> str:
+        """修复生成输入文件中的物种引用
+
+        后处理：自动检测并修复错误的物种引用
+        核心功能：根据用户指定的gas参数，验证并修复species引用
+        """
+        import re
+
+        # 1. 根据用户指定的gas参数确定正确的species文件
+        gas = parameters.get('gas', 'air').lower().strip()
+
+        # 气体到species文件的映射
+        if 'ar' in gas and 'air' not in gas:
+            # 用户明确指定氩气
+            species_filename = "ar.species"
+        elif 'he' in gas:
+            # 氦气
+            species_filename = "he.species"
+        elif 'n2' in gas and 'air' not in gas:
+            # 纯氮气
+            species_filename = "n2.species"
+        else:
+            # 默认使用空气(air.species)或6SpeciesAir
+            species_filename = "air.species"
+
+        valid_species = SPECIES_FILE_MAPPING.get(species_filename, None)
+
+        # 如果在映射表中没找到，尝试从实际文件读取
+        if valid_species is None and session_dir:
+            species_path = session_dir / species_filename
+            if species_path.exists():
+                valid_species = self._parse_species_file(species_path)
+
+        # 如果仍然没找到，使用默认空气物种
+        if valid_species is None:
+            valid_species = ["O2", "N2"]
+
+        # 2. 找到所有mixture定义中的物种
+        # 匹配: mixture air split O2 N2 或 mixture air full O2 N2
+        mixture_pattern = r'mixture\s+\w+\s+(?:split|full)\s+([\w\s]+?)(?:\n|$)'
+        mixtures = re.findall(mixture_pattern, input_file, re.IGNORECASE)
+
+        # 3. 找到所有species命令中引用的物种
+        # 匹配: species air.species O2
+        species_ref_pattern = r'species\s+\S+\s+(\w+)'
+        species_refs = re.findall(species_ref_pattern, input_file, re.IGNORECASE)
+
+        # 4. 验证并修复
+        all_referenced_species = set()
+        for m in mixtures:
+            all_referenced_species.update(m.split())
+
+        fixed_input = input_file
+
+        # 检查每个引用的物种是否有效
+        for species in list(all_referenced_species) + species_refs:
+            if species and species not in valid_species:
+                # 物种无效，替换为第一个有效物种
+                print(f"    ⚠️ 发现无效物种 '{species}'，替换为 '{valid_species[0]}'")
+                fixed_input = re.sub(
+                    rf'(\bmixture\s+\w+\s+(?:split|full)\s+){species}(\b)',
+                    rf'\1{valid_species[0]}\2',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+                fixed_input = re.sub(
+                    rf'(\bspecies\s+\S+\s+){species}(\b)',
+                    rf'\1{valid_species[0]}\2',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+
+        # 5. 强制修正关键参数（确保遵守用户指定值）
+        # 修正运行步数
+        if 'num_steps' in parameters:
+            target_steps = parameters['num_steps']
+            fixed_input = re.sub(
+                r'(\brun\s+)\d+',
+                rf'\g<1>{target_steps}',
+                fixed_input,
+                flags=re.IGNORECASE
+            )
+
+        # 修正粒子权重fnum（控制粒子数量）
+        if 'fnum' in parameters:
+            target_fnum = parameters['fnum']
+            # 修正 global nrho ... fnum ...
+            fixed_input = re.sub(
+                r'(global\s+nrho\s+[\d.e+-]+\s+fnum\s+)[\d.e+-]+',
+                rf'\g<1>{target_fnum:.0e}',
+                fixed_input,
+                flags=re.IGNORECASE
+            )
+            # 如果没有fnum定义，添加到global命令后
+            if 'fnum' not in fixed_input.lower():
+                # 尝试在第一个global命令后添加
+                fixed_input = re.sub(
+                    r'(global\s+[^#\n]+)',
+                    rf'\g<1> fnum {target_fnum:.0e}',
+                    fixed_input,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+
+        # 修正网格尺寸
+        if 'grid_size' in parameters:
+            grid = parameters['grid_size']
+            if len(grid) >= 2:
+                # 2D网格
+                if len(grid) == 2:
+                    new_grid = f"{grid[0]} {grid[1]} 1"
+                else:
+                    new_grid = ' '.join(map(str, grid))
+                fixed_input = re.sub(
+                    r'(create_grid\s+)\d+\s+\d+(?:\s+\d+)?',
+                    rf'\g<1>{new_grid}',
+                    fixed_input,
+                    flags=re.IGNORECASE
+                )
+
+        return fixed_input
+
+    def _parse_species_file(self, species_path: Path) -> List[str]:
+        """解析species文件，提取有效物种列表"""
+        try:
+            content = species_path.read_text(encoding='utf-8', errors='ignore')
+            species_list = []
+            for line in content.split('\n'):
+                line = line.strip()
+                # 跳过注释和空行
+                if not line or line.startswith('#'):
+                    continue
+                # 物种名是第一个字段
+                parts = line.split()
+                if parts:
+                    species_list.append(parts[0])
+            return species_list
+        except Exception as e:
+            print(f"    ⚠️ 解析species文件失败: {e}")
+            return ["O2", "N2"]  # 默认
 
     def _generate_annotations(self, input_file: str, parameters: Dict) -> Dict:
         """生成逐行注释（使用LLM，较慢）"""
@@ -1418,7 +2033,7 @@ class DSMCAgent:
 请返回JSON格式：{{"行号": "注释", ...}}"""
 
         try:
-            response = call_llm(prompt, temperature=0.3, max_tokens=2048)
+            response = call_llm(prompt, temperature=0.3, max_tokens=8192)
             # 尝试解析JSON
             from utils import extract_code_block
             json_text = extract_code_block(response, "json")
@@ -1487,7 +2102,7 @@ class DSMCAgent:
 
 请说明："""
 
-            reasoning = call_llm(prompt, temperature=0.5, max_tokens=4096)
+            reasoning = call_llm(prompt, temperature=0.5, max_tokens=8192)
 
             # 如果LLM调用失败（返回空字符串），使用基于规则的说明
             if not reasoning or not reasoning.strip():

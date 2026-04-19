@@ -28,6 +28,42 @@ def mask_api_key(value: str) -> str:
     return value[:5] + '*' * (len(value) - 9) + value[-4:]
 
 
+def sanitize_error_message(error_text: str) -> str:
+    """
+    Remove sensitive information (API keys, tokens) from error messages.
+
+    This function replaces patterns that look like partially masked or full API keys
+    with a generic placeholder to prevent sensitive information leakage.
+
+    Args:
+        error_text: The error message text that may contain sensitive info
+
+    Returns:
+        Sanitized error message with sensitive info removed
+
+    Examples:
+        >>> sanitize_error_message('[jW******************************************1b74]无效的令牌')
+        '[API_KEY_HIDDEN]无效的令牌'
+        >>> sanitize_error_message('sk-ant-api03-abc***def invalid token')
+        '[API_KEY_HIDDEN] invalid token'
+    """
+    import re
+
+    # Pattern 1: Partially masked keys with brackets [XX***YY]
+    error_text = re.sub(r'\[[a-zA-Z0-9]{1,10}\*+[a-zA-Z0-9]{1,10}\]', '[API_KEY_HIDDEN]', error_text)
+
+    # Pattern 2: API keys with common prefixes (sk-, sk-ant-, etc.)
+    error_text = re.sub(r'sk-[a-zA-Z0-9\-_\*]{10,}', '[API_KEY_HIDDEN]', error_text)
+
+    # Pattern 3: Long strings of alphanumeric characters with asterisks (likely masked keys)
+    error_text = re.sub(r'\b[a-zA-Z0-9]{2,10}\*{5,}[a-zA-Z0-9]{2,10}\b', '[API_KEY_HIDDEN]', error_text)
+
+    # Pattern 4: Bearer tokens in Authorization headers
+    error_text = re.sub(r'Bearer\s+[a-zA-Z0-9\-_\.\*]{10,}', 'Bearer [TOKEN_HIDDEN]', error_text, flags=re.IGNORECASE)
+
+    return error_text
+
+
 def test_api_connection(
     api_url: str,
     api_key: str,
@@ -64,7 +100,7 @@ def test_api_connection(
                 'anthropic-version': '2023-06-01',
                 'content-type': 'application/json'
             }
-            test_url = f"{api_url.rstrip('/')}/messages"
+            test_url = f"{api_url.rstrip('/')}/v1/messages"
             payload = {
                 'model': model,
                 'max_tokens': 10,
@@ -76,7 +112,7 @@ def test_api_connection(
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json'
             }
-            test_url = f"{api_url.rstrip('/')}/chat/completions"
+            test_url = f"{api_url.rstrip('/')}/v1/chat/completions"
             payload = {
                 'model': model,
                 'max_tokens': 10,
@@ -93,9 +129,12 @@ def test_api_connection(
         if response.status_code == 200:
             return {'success': True, 'message': '连接成功'}
         else:
+            # Sanitize error message to remove any leaked API keys
+            raw_error = response.text[:200]
+            safe_error = sanitize_error_message(raw_error)
             return {
                 'success': False,
-                'error': f'连接失败: {response.status_code} - {response.text[:100]}'
+                'error': f'连接失败: {response.status_code} - {safe_error}'
             }
 
     except requests.Timeout:
@@ -152,7 +191,7 @@ def call_llm(
                 'anthropic-version': '2023-06-01',
                 'content-type': 'application/json'
             }
-            endpoint = f"{api_url.rstrip('/')}/messages"
+            endpoint = f"{api_url.rstrip('/')}/v1/messages"
             payload = {
                 'model': model,
                 'max_tokens': max_tokens,
@@ -168,13 +207,17 @@ def call_llm(
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json'
             }
-            endpoint = f"{api_url.rstrip('/')}/chat/completions"
+            endpoint = f"{api_url.rstrip('/')}/v1/chat/completions"
+            # Add system message for faster response (skip thinking process)
+            enhanced_messages = [{'role': 'system', 'content': '请直接输出结果，不要展示思考过程。'}]
+            enhanced_messages.extend(messages)
             payload = {
                 'model': model,
                 'max_tokens': max_tokens,
-                'messages': messages,
+                'messages': enhanced_messages,
                 'temperature': temperature,
-                'stream': stream
+                'stream': stream,
+                'enable_thinking': False  # Disable reasoning/thinking process for faster response
             }
 
         response = requests.post(
@@ -197,7 +240,19 @@ def call_llm(
             if api_type == 'anthropic':
                 content = data.get('content', [{}])[0].get('text', '')
             else:
-                content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                # OpenAI compatible format
+                # For glm-5: content is the final answer, reasoning_content is thinking process
+                # Only use content, ignore reasoning_content
+                message = data.get('choices', [{}])[0].get('message', {})
+                content = message.get('content') or ''
+
+                # Check if response was truncated (finish_reason: length)
+                finish_reason = data.get('choices', [{}])[0].get('finish_reason', '')
+                if finish_reason == 'length' and not content:
+                    return {
+                        'success': False,
+                        'error': '响应被截断，请增加 max_tokens 参数'
+                    }
 
             return {
                 'success': True,
@@ -205,9 +260,12 @@ def call_llm(
                 'raw_response': data
             }
         else:
+            # Sanitize error message to remove any leaked API keys
+            raw_error = response.text[:200]
+            safe_error = sanitize_error_message(raw_error)
             return {
                 'success': False,
-                'error': f'API error: {response.status_code} - {response.text[:200]}'
+                'error': f'API error: {response.status_code} - {safe_error}'
             }
 
     except requests.Timeout:

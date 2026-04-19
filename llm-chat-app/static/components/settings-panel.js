@@ -44,7 +44,19 @@ class SettingsPanel {
         });
 
         document.getElementById('settingApiUrl').value = settings.API_URL || '';
-        document.getElementById('settingApiKey').value = settings.API_KEY || '';
+
+        // Handle API Key - don't populate if it's masked
+        const apiKeyInput = document.getElementById('settingApiKey');
+        const apiKey = settings.API_KEY || '';
+        if (apiKey && apiKey.includes('*')) {
+            // API key is masked, don't populate, just show placeholder
+            apiKeyInput.value = '';
+            apiKeyInput.placeholder = '已设置（如需修改请重新输入完整密钥）';
+        } else {
+            // API key is not masked (first load or empty)
+            apiKeyInput.value = apiKey;
+            apiKeyInput.placeholder = 'sk-...';
+        }
 
         // 动态填充模型选择器
         const modelSelect = document.getElementById('settingLlmModel');
@@ -67,6 +79,7 @@ class SettingsPanel {
         document.getElementById('settingTemperature').value = settings.DEFAULT_TEMPERATURE || '0.7';
         document.getElementById('settingMaxSteps').value = settings.DEFAULT_MAX_STEPS || '1000';
         document.getElementById('settingNumCores').value = settings.DEFAULT_NUM_CORES || '4';
+        document.getElementById('settingMaxFixAttempts').value = settings.DEFAULT_MAX_FIX_ATTEMPTS || '10';
 
         // RAG Configuration
         document.getElementById('settingRagEnabled').checked = settings.RAG_ENABLED === 'true';
@@ -74,18 +87,26 @@ class SettingsPanel {
     }
 
     collectFormData() {
-        return {
+        const apiKeyInput = document.getElementById('settingApiKey').value.trim();
+        const formData = {
             API_TYPE: document.querySelector('input[name="apiType"]:checked').value,
             API_URL: document.getElementById('settingApiUrl').value.trim(),
-            API_KEY: document.getElementById('settingApiKey').value.trim(),
             LLM_MODEL: document.getElementById('settingLlmModel').value,
             MAX_TOKENS: document.getElementById('settingMaxTokens').value,
             DEFAULT_TEMPERATURE: document.getElementById('settingTemperature').value,
             DEFAULT_MAX_STEPS: document.getElementById('settingMaxSteps').value,
             DEFAULT_NUM_CORES: document.getElementById('settingNumCores').value,
+            DEFAULT_MAX_FIX_ATTEMPTS: document.getElementById('settingMaxFixAttempts').value,
             RAG_ENABLED: document.getElementById('settingRagEnabled').checked ? 'true' : 'false',
             RAG_TOP_K: document.getElementById('settingRagTopK').value
         };
+
+        // Only include API_KEY if user has entered a new one (non-empty and not masked)
+        if (apiKeyInput && !apiKeyInput.includes('*')) {
+            formData.API_KEY = apiKeyInput;
+        }
+
+        return formData;
     }
 
     async save() {
@@ -124,11 +145,11 @@ class SettingsPanel {
     async testConnection() {
         const apiType = document.querySelector('input[name="apiType"]:checked').value;
         const apiUrl = document.getElementById('settingApiUrl').value.trim();
-        const apiKey = document.getElementById('settingApiKey').value.trim();
+        const apiKeyInput = document.getElementById('settingApiKey').value.trim();
         const model = document.getElementById('settingLlmModel').value;
 
-        if (!apiUrl || !apiKey) {
-            alert('请填写API地址和密钥');
+        if (!apiUrl) {
+            alert('请填写API地址');
             return;
         }
 
@@ -138,10 +159,23 @@ class SettingsPanel {
         statusEl.classList.remove('hidden');
 
         try {
+            // Build request body
+            const requestBody = {
+                API_TYPE: apiType,
+                API_URL: apiUrl,
+                LLM_MODEL: model
+            };
+
+            // Only send API_KEY if user has entered a new one (non-empty and not masked)
+            // If empty or masked, backend will use the stored key from config
+            if (apiKeyInput && !apiKeyInput.includes('*')) {
+                requestBody.API_KEY = apiKeyInput;
+            }
+
             const response = await fetch('/api/settings/test-connection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ API_TYPE: apiType, API_URL: apiUrl, API_KEY: apiKey, LLM_MODEL: model })
+                body: JSON.stringify(requestBody)
             });
 
             const data = await response.json();
@@ -190,6 +224,16 @@ class SettingsPanel {
         } else {
             input.type = 'password';
             btn.textContent = '👁️';
+        }
+
+        // If input is empty (showing placeholder), inform user
+        if (!input.value && input.placeholder.includes('已设置')) {
+            // Show a temporary tooltip or message
+            const originalPlaceholder = input.placeholder;
+            input.placeholder = '密钥已保存，如需修改请输入新密钥';
+            setTimeout(() => {
+                input.placeholder = originalPlaceholder;
+            }, 3000);
         }
     }
 }
